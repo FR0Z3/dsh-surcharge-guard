@@ -268,3 +268,55 @@ test('reports a failed catalog read without losing the table', async () => {
   assert.ok(text.includes('gpt-6.1-sol'), 'the table still renders')
   assert.ok(text.includes('scan'), 'the rescan control is offered')
 })
+
+// ---- the list one-liner ----------------------------------------------------
+
+const Summary = clientModule.__summary
+
+/** Mount the summary view. */
+async function mountSummary(form) {
+  let root
+  await TestRenderer.act(async () => {
+    root = TestRenderer.create(React.createElement(Summary, { t, form }))
+  })
+  await settle()
+  return root
+}
+
+test('the summary view is a one-liner, not the whole form', async () => {
+  const root = await mountSummary(fakeForm(defaultConfig))
+  const text = textsOf(root.toJSON()).join(' ')
+  assert.equal(text, 'summaryOn', `only the one-liner renders (saw: ${text})`)
+  assert.equal(text.includes('colLine'), false, 'no table leaks into the list row')
+})
+
+test('the summary counts only enabled rules', async () => {
+  const form = fakeForm({
+    ...defaultConfig,
+    rules: [
+      { provider: 'p', model: 'a', surchargeAtTokens: 1, enabled: true },
+      { provider: 'p', model: 'b', surchargeAtTokens: 1, enabled: false },
+    ],
+  })
+  const root = await mountSummary(form)
+  assert.equal(textsOf(root.toJSON()).join(' '), 'summaryOn')
+})
+
+test('the summary names the off and empty states', async () => {
+  const off = await mountSummary(fakeForm({ ...defaultConfig, enabled: false }))
+  assert.equal(textsOf(off.toJSON()).join(' '), 'summaryOff')
+
+  const empty = await mountSummary(fakeForm({ ...defaultConfig, rules: [] }))
+  assert.equal(textsOf(empty.toJSON()).join(' '), 'summaryNoRules')
+})
+
+test('the card is what the page view renders', async () => {
+  const form = fakeForm(defaultConfig)
+  let root
+  await TestRenderer.act(async () => {
+    root = TestRenderer.create(React.createElement(clientModule.__page, { t, ctx: fakeContext({ catalog: defaultCatalog }), form }))
+  })
+  await settle()
+  const text = textsOf(root.toJSON()).join(' ')
+  assert.ok(text.includes('colLine'), 'the page view carries the table')
+})

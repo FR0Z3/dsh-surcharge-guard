@@ -66,7 +66,10 @@ window.__ModuleLoader__.load({
       "familyGrok": "Grok",
       "docs": "说明",
       "providerAll": "全部服务商",
-      "noCatalog": "未读取到模型目录，请确认服务商已配置；规则仍可手动添加。"
+      "noCatalog": "未读取到模型目录，请确认服务商已配置；规则仍可手动添加。",
+      "summaryOff": "计费保护已关闭",
+      "summaryNoRules": "已启用，还没有规则",
+      "summaryOn": "正在保护 {count} 个模型"
 }
 
     const en = {
@@ -112,7 +115,10 @@ window.__ModuleLoader__.load({
       "familyGrok": "Grok",
       "docs": "About",
       "providerAll": "All providers",
-      "noCatalog": "The model catalog is unavailable. Check that a provider is configured; rules can still be added by hand."
+      "noCatalog": "The model catalog is unavailable. Check that a provider is configured; rules can still be added by hand.",
+      "summaryOff": "Surcharge guard is off",
+      "summaryNoRules": "On, no rules yet",
+      "summaryOn": "Guarding {count} models"
 }
 
 
@@ -604,12 +610,36 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** The slot component: the page supplies `view` and the form. */
-    const Card = props => h(Panel, {
-      t: props.t ?? clientCtx.locale.bind(NS),
-      ctx: clientCtx,
-      form: props.form,
-    })
+    /**
+     * The slot component.
+     *
+     * The page asks for one of two views of the same entry: `summary` is the
+     * one-liner drawn in the plugin list, `page` is the body of the plugin's own
+     * page. Rendering the whole form for `summary` would stretch every row of
+     * the list, so the two are separate components.
+     */
+    const Card = props => {
+      const t = props.t ?? clientCtx.locale.bind(NS)
+      if (props.view === 'summary') return h(Summary, { t, form: props.form })
+      return h(Panel, { t, ctx: clientCtx, form: props.form })
+    }
+
+    /**
+     * The one-liner the plugin list draws for this entry.
+     *
+     * States the guard's current posture in one sentence, so the list answers
+     * "is this on, and how many models are guarded" without opening the page.
+     */
+    function Summary({ t, form }) {
+      const snapshot = form?.state ?? EMPTY_SNAPSHOT
+      if (snapshot.status === 'loading') return h('span', null, t('loading'))
+      if (snapshot.status !== 'ready') return h('span', null, t('notWritable'))
+      if (fieldOf(snapshot, 'enabled', true) === false) return h('span', null, t('summaryOff'))
+      const rules = fieldOf(snapshot, 'rules', [])
+      const active = rules.filter(rule => rule.enabled !== false).length
+      if (active === 0) return h('span', null, t('summaryNoRules'))
+      return h('span', null, t('summaryOn').replace('{count}', String(active)))
+    }
 
     let clientCtx
 
@@ -617,6 +647,7 @@ window.__ModuleLoader__.load({
       inject: ['slots', 'locale'],
       /** Exposed for the render tests; the shell reads only `inject` and `apply`. */
       __page: Panel,
+      __summary: Summary,
       apply(ctx) {
         clientCtx = ctx
         // Dictionaries first, so the card's text resolves on the first render.
