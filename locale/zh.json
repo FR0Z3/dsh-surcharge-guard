@@ -45,5 +45,6 @@
   "familyGemini": "Gemini",
   "familyGrok": "Grok",
   "docs": "说明",
-  "providerAll": "全部服务商"
+  "providerAll": "全部服务商",
+  "noCatalog": "未读取到模型目录，请确认服务商已配置；规则仍可手动添加。"
 }

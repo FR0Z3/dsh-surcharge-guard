@@ -32,7 +32,7 @@ The window keeps its real capacity; only the trigger position moves.
 
 ## Usage
 
-After installing, open **Settings → Surcharge guard**:
+After installing, open **Plugins → Surcharge guard**; the form sits on the plugin's own page:
 
 1. Turn the master switch on.
 2. Click "Add all GPT models", "Add all Gemini models" and so on to create rules for every matching model across all providers in one go.
@@ -94,7 +94,7 @@ pnpm test           # tests only
 - `logic.js` is a pure, dependency-free module; `tests/logic.test.mjs` tests it directly.
 - `tests/client.test.mjs` mounts the settings page with `react-test-renderer` and a stubbed `fetch`, covering the table, bulk add, commit timing and failure states.
 - `index.js` is the Host half: it registers `agent/pre-step` and three same-origin routes for the settings page.
-- `client.js` is the browser half, registering one `settings.section` page. All state lives in the Host; the page only fetches, renders and posts edits.
+- `client.js` is the browser half, registering into `plugins.bundle.config` (keyed by package name). It reads and writes through `configForms`, so no HTTP route is involved.
 - `locale/*.json` holds the display text Plugin Manager reads; the UI strings are inlined in `client.js`, and `scripts/check-locale.mjs` keeps the two copies in step.
 
 ## License

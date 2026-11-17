@@ -45,5 +45,6 @@
   "familyGemini": "Gemini",
   "familyGrok": "Grok",
   "docs": "About",
-  "providerAll": "All providers"
+  "providerAll": "All providers",
+  "noCatalog": "The model catalog is unavailable. Check that a provider is configured; rules can still be added by hand."
 }

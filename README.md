@@ -32,7 +32,7 @@ headroom = W − output − (起点 − 安全余量)
 
 ## 用法
 
-安装后在 **设置 → 计费保护** 打开：
+安装后打开 **插件 → 计费保护**，配置就在插件页里：
 
 1. 打开总开关。
 2. 点「添加全部 GPT 模型」「添加全部 Gemini 模型」等按钮，一次为所有服务商下的匹配模型建规则。
@@ -94,7 +94,7 @@ pnpm test           # 只跑测试
 - `logic.js` 是不依赖任何运行时的纯函数模块，`tests/logic.test.mjs` 直接测它。
 - `tests/client.test.mjs` 用 `react-test-renderer` 加桩 `fetch` 挂载设置页，检查表格、批量添加、提交时机和失败态。
 - `index.js` 是 Host 半边：注册 `agent/pre-step`，并提供三个同源路由给设置页读写。
-- `client.js` 是浏览器半边，注册一个 `settings.section` 页面；所有状态都在 Host，页面只做拉取、渲染、回写。
+- `client.js` 是浏览器半边，注册到 `plugins.bundle.config`（按包名键控），配置读写走 `configForms`，因此不经过任何 HTTP 路由。
 - `locale/*.json` 是 Plugin Manager 读的显示文案；界面字符串在 `client.js` 里内联一份，`scripts/check-locale.mjs` 保证两份不漂移。
 
 ## 许可

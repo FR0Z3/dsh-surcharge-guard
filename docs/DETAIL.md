@@ -40,7 +40,7 @@ Only the guard's own threshold is written; the window keeps its real capacity.
 
 ## What you get
 
-- One settings page, **Settings → Surcharge guard**, listing every guarded model
+- One settings card on **Plugins → Surcharge guard**, listing every guarded model
   with its line, its computed trigger point, and a per-model on/off.
 - A **threshold per model**, so GPT can sit at 272K while Gemini and Grok sit at
   200K.
@@ -83,7 +83,7 @@ do without the plugin.
 - **Summaries can refuse to shrink.** When a region is already dense, the
   summarizer may return text that is not smaller than what it replaces. The retry
   limit stops it from being attempted on every step of the same turn.
-- **The rendered page is verified by render tests, not by eye.** The settings page
-  is mounted in `tests/client.test.mjs` with a stubbed Host, which covers the
-  table, the bulk add and the failure states, but a live screenshot still needs a
-  logged-in browser.
+- **The rendered card is verified by render tests, not by eye.** It is mounted in
+  `tests/client.test.mjs` against a fake `configForms` handle and a fake model
+  catalog, which covers the table, the bulk add, the write timing and the failure
+  states, but a live screenshot still needs a logged-in browser.

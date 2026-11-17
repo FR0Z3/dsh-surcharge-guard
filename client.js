@@ -1,14 +1,15 @@
 /**
  * dsh-surcharge-guard — Client half.
  *
- * Renders one `settings.section` page. All state lives in the Host: this module
- * only fetches, renders, and posts edits back, so the page never disagrees with
- * what the guard actually does.
+ * Renders the plugin's own configuration on its bundle page in **Plugins**
+ * (`plugins.bundle.config`, keyed by this package's name), between the
+ * description and the rows.
  *
- * The Host exposes three same-origin routes (see `index.js`):
- *   GET  /plugins/dsh-surcharge-guard/state   current config + family table
- *   GET  /plugins/dsh-surcharge-guard/models  provider catalog with windows
- *   POST /plugins/dsh-surcharge-guard/config  validated save
+ * State goes through the `configForms` service, so this half owns no HTTP route
+ * and no duplicate copy of the config: a write lands in the same volatile fields
+ * the Host half reads on the next step. The model catalog comes from the shared
+ * `remote` gateway; when it is unavailable the same rules are still editable by
+ * hand, and the card renders.
  *
  * @module dsh-surcharge-guard/client
  */
@@ -18,105 +19,117 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const h = React.createElement
 
-    /** The section id is also the settings nav icon's address. */
-    const SECTION_ID = 'dsh-surcharge-guard'
-    /** Same-origin base shared with the Host half. */
-    const ROUTE_BASE = `/plugins/${SECTION_ID}`
-    /** Locale namespace for this plugin's strings. */
+    /** Bundle key, settings namespace and slot key are one string. */
     const NS = 'dsh-surcharge-guard'
 
-    /** Page strings; kept in step with `locale/*.json` by `scripts/check-locale.mjs`. */
+    /** Page strings, kept in step with `locale/*.json` by `scripts/check-locale.mjs`. */
     const zh = {
-          "nav": "计费保护",
-          "title": "计费保护",
-          "intro": "超过起点后，provider 按双倍计费。开启后，插件会在每次请求前检查用量，到线前压缩历史。",
-          "enabled": "启用计费保护",
-          "enabledHint": "关闭后所有规则停止生效，已有配置保留。",
-          "margin": "安全余量",
-          "marginHint": "在起点以下多少 token 触发压缩。估算有误差，留出余量才不会越线。",
-          "retain": "保留比例",
-          "retainHint": "压缩时保留最近多少比例的内容不摘要。",
-          "maxAttempts": "重试上限",
-          "maxAttemptsHint": "同一轮内摘要失败的最大重试次数，避免反复调用。",
-          "rules": "规则",
-          "rulesEmpty": "还没有规则。用下面的按钮按家族批量添加，或手动添加单条。",
-          "colProvider": "服务商",
-          "colModel": "模型",
-          "colLine": "双倍计费起点",
-          "colWindow": "上下文窗口",
-          "colStatus": "状态",
-          "colActions": "操作",
-          "on": "已保护",
-          "off": "已停用",
-          "cap": "到线前触发于",
-          "remove": "移除",
-          "addTitle": "一键添加",
-          "addHint": "为所有服务商里匹配到的模型添加规则，阈值取 provider 公布的起点。",
-          "addFamily": "添加全部 {family} 模型",
-          "addManual": "手动添加",
-          "scan": "重新扫描模型",
-          "scanning": "正在读取模型目录…",
-          "noModels": "没有读到任何模型。请确认已在「模型」设置里配置服务商。",
-          "unknownFamily": "未识别的模型需要手动填写起点。",
-          "saved": "已保存",
-          "saveFailed": "保存失败",
-          "notWritable": "当前配置层不可写，请检查 profile 配置。",
-          "loading": "正在加载…",
-          "loadFailed": "读取失败",
-          "retry": "重试",
-          "familyGpt": "GPT",
-          "familyGemini": "Gemini",
-          "familyGrok": "Grok",
-          "docs": "说明",
-          "providerAll": "全部服务商"
-    }
+      "nav": "计费保护",
+      "title": "计费保护",
+      "intro": "超过起点后，provider 按双倍计费。开启后，插件会在每次请求前检查用量，到线前压缩历史。",
+      "enabled": "启用计费保护",
+      "enabledHint": "关闭后所有规则停止生效，已有配置保留。",
+      "margin": "安全余量",
+      "marginHint": "在起点以下多少 token 触发压缩。估算有误差，留出余量才不会越线。",
+      "retain": "保留比例",
+      "retainHint": "压缩时保留最近多少比例的内容不摘要。",
+      "maxAttempts": "重试上限",
+      "maxAttemptsHint": "同一轮内摘要失败的最大重试次数，避免反复调用。",
+      "rules": "规则",
+      "rulesEmpty": "还没有规则。用下面的按钮按家族批量添加，或手动添加单条。",
+      "colProvider": "服务商",
+      "colModel": "模型",
+      "colLine": "双倍计费起点",
+      "colWindow": "上下文窗口",
+      "colStatus": "状态",
+      "colActions": "操作",
+      "on": "已保护",
+      "off": "已停用",
+      "cap": "到线前触发于",
+      "remove": "移除",
+      "addTitle": "一键添加",
+      "addHint": "为所有服务商里匹配到的模型添加规则，阈值取 provider 公布的起点。",
+      "addFamily": "添加全部 {family} 模型",
+      "addManual": "手动添加",
+      "scan": "重新扫描模型",
+      "scanning": "正在读取模型目录…",
+      "noModels": "没有读到任何模型。请确认已在「模型」设置里配置服务商。",
+      "unknownFamily": "未识别的模型需要手动填写起点。",
+      "saved": "已保存",
+      "saveFailed": "保存失败",
+      "notWritable": "当前配置层不可写，请检查 profile 配置。",
+      "loading": "正在加载…",
+      "loadFailed": "读取失败",
+      "retry": "重试",
+      "familyGpt": "GPT",
+      "familyGemini": "Gemini",
+      "familyGrok": "Grok",
+      "docs": "说明",
+      "providerAll": "全部服务商",
+      "noCatalog": "未读取到模型目录，请确认服务商已配置；规则仍可手动添加。"
+}
 
     const en = {
-          "nav": "Surcharge guard",
-          "title": "Surcharge guard",
-          "intro": "Past the threshold, the provider bills the request at double rate. With this on, the plugin measures usage before each request and folds history before reaching the line.",
-          "enabled": "Enable surcharge guard",
-          "enabledHint": "Turning this off stops every rule; saved rules are kept.",
-          "margin": "Safety margin",
-          "marginHint": "How far below the threshold to trigger. Measurement is an estimate, so the margin absorbs the error.",
-          "retain": "Retain ratio",
-          "retainHint": "Fraction of recent content kept verbatim when folding.",
-          "maxAttempts": "Retry limit",
-          "maxAttemptsHint": "Maximum summary attempts within one turn, so a stubborn history is not retried forever.",
-          "rules": "Rules",
-          "rulesEmpty": "No rules yet. Add a model family in bulk below, or add one manually.",
-          "colProvider": "Provider",
-          "colModel": "Model",
-          "colLine": "Double-billing threshold",
-          "colWindow": "Context window",
-          "colStatus": "Status",
-          "colActions": "Actions",
-          "on": "Guarded",
-          "off": "Off",
-          "cap": "Triggers at",
-          "remove": "Remove",
-          "addTitle": "Quick add",
-          "addHint": "Add a rule for every matching model across all providers, using the provider's published threshold.",
-          "addFamily": "Add all {family} models",
-          "addManual": "Add manually",
-          "scan": "Rescan models",
-          "scanning": "Reading model catalog…",
-          "noModels": "No models found. Make sure a provider is configured under Models.",
-          "unknownFamily": "Unrecognized models need a manually entered threshold.",
-          "saved": "Saved",
-          "saveFailed": "Save failed",
-          "notWritable": "This configuration layer is not writable. Check the profile configuration.",
-          "loading": "Loading…",
-          "loadFailed": "Failed to load",
-          "retry": "Retry",
-          "familyGpt": "GPT",
-          "familyGemini": "Gemini",
-          "familyGrok": "Grok",
-          "docs": "About",
-          "providerAll": "All providers"
-    }
+      "nav": "Surcharge guard",
+      "title": "Surcharge guard",
+      "intro": "Past the threshold, the provider bills the request at double rate. With this on, the plugin measures usage before each request and folds history before reaching the line.",
+      "enabled": "Enable surcharge guard",
+      "enabledHint": "Turning this off stops every rule; saved rules are kept.",
+      "margin": "Safety margin",
+      "marginHint": "How far below the threshold to trigger. Measurement is an estimate, so the margin absorbs the error.",
+      "retain": "Retain ratio",
+      "retainHint": "Fraction of recent content kept verbatim when folding.",
+      "maxAttempts": "Retry limit",
+      "maxAttemptsHint": "Maximum summary attempts within one turn, so a stubborn history is not retried forever.",
+      "rules": "Rules",
+      "rulesEmpty": "No rules yet. Add a model family in bulk below, or add one manually.",
+      "colProvider": "Provider",
+      "colModel": "Model",
+      "colLine": "Double-billing threshold",
+      "colWindow": "Context window",
+      "colStatus": "Status",
+      "colActions": "Actions",
+      "on": "Guarded",
+      "off": "Off",
+      "cap": "Triggers at",
+      "remove": "Remove",
+      "addTitle": "Quick add",
+      "addHint": "Add a rule for every matching model across all providers, using the provider's published threshold.",
+      "addFamily": "Add all {family} models",
+      "addManual": "Add manually",
+      "scan": "Rescan models",
+      "scanning": "Reading model catalog…",
+      "noModels": "No models found. Make sure a provider is configured under Models.",
+      "unknownFamily": "Unrecognized models need a manually entered threshold.",
+      "saved": "Saved",
+      "saveFailed": "Save failed",
+      "notWritable": "This configuration layer is not writable. Check the profile configuration.",
+      "loading": "Loading…",
+      "loadFailed": "Failed to load",
+      "retry": "Retry",
+      "familyGpt": "GPT",
+      "familyGemini": "Gemini",
+      "familyGrok": "Grok",
+      "docs": "About",
+      "providerAll": "All providers",
+      "noCatalog": "The model catalog is unavailable. Check that a provider is configured; rules can still be added by hand."
+}
 
-    /** Compact form already formatted by the Host, shown as a fallback. */
+
+    /** Token thresholds the providers publish, used to prefill a rule. */
+    const FAMILIES = [
+      { id: 'gpt', surchargeAtTokens: 272000 },
+      { id: 'gemini', surchargeAtTokens: 200000 },
+      { id: 'grok', surchargeAtTokens: 200000 },
+    ]
+
+    /** A form handle, as `configForms` exposes one per namespace. */
+    // { getSnapshot(), subscribe(fn), set(field, value), dispose() }
+
+    /** Snapshot used before the form is reachable. */
+    const EMPTY_SNAPSHOT = { status: 'unavailable' }
+
+    /** Compact a token count for display. */
     function formatTokens(value) {
       if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
       if (value >= 1000000) return `${(value / 1000000).toFixed(2)}M`
@@ -124,7 +137,7 @@ window.__ModuleLoader__.load({
       return String(value)
     }
 
-    /** Parse a token field that accepts `272000`, `272K` and `1.05M`. */
+    /** Parse `272000`, `272K` and `1.05M`. */
     function parseTokens(text) {
       const raw = String(text).trim().toLowerCase().replace(/[,_\s]/g, '')
       if (raw.length === 0) return undefined
@@ -133,85 +146,72 @@ window.__ModuleLoader__.load({
       const base = Number(match[1])
       if (!Number.isFinite(base)) return undefined
       const scale = match[2] === 'm' ? 1000000 : match[2] === 'k' ? 1000 : 1
-      const value = Math.round(base * scale)
-      return value > 0 ? value : undefined
+      const parsed = Math.round(base * scale)
+      return parsed > 0 ? parsed : undefined
     }
 
-    /** Fetch JSON from a plugin route, surfacing a non-2xx body as an error. */
-    async function fetchJson(path, init) {
-      const response = await fetch(`${ROUTE_BASE}${path}`, {
-        credentials: 'same-origin',
-        ...init,
-      })
-      let body
-      try {
-        body = await response.json()
-      } catch {
-        throw new Error(`HTTP ${response.status}`)
-      }
-      if (!response.ok || body?.ok !== true) {
-        throw new Error(typeof body?.error === 'string' ? body.error : `HTTP ${response.status}`)
-      }
-      return body
+    /** Whether a value is a live (volatile) reference and not a plain value. */
+    const isLive = value => value !== null && typeof value === 'object' && typeof value.get === 'function'
+
+    /** Resolve one field of a form snapshot, unwrapping a live reference. */
+    function fieldOf(snapshot, key, fallback) {
+      const value = snapshot?.value?.[key]
+      if (value === undefined) return fallback
+      return isLive(value) ? value.get() : value
     }
 
-    // ---- styles -----------------------------------------------------------
-    // Only `--dsw-alias-*` tokens, so light/dark switching is automatic.
-
+    /** The styles; only `--dsw-alias-*` tokens, so light/dark follows the host. */
     const styles = {
-      page: {
+      root: {
         display: 'flex',
         flexDirection: 'column',
-        gap: '20px',
-        fontSize: '13px',
+        gap: '14px',
         color: 'var(--dsw-alias-label-primary)',
+        fontSize: '13px',
+        lineHeight: 1.5,
       },
-      intro: {
-        margin: 0,
-        color: 'var(--dsw-alias-label-secondary)',
-        lineHeight: 1.6,
-      },
-      card: {
+      intro: { margin: 0, color: 'var(--dsw-alias-label-secondary)', maxWidth: '760px' },
+      group: {
         display: 'flex',
         flexDirection: 'column',
-        gap: '12px',
-        padding: '16px',
-        borderRadius: '10px',
+        gap: '10px',
+        padding: '12px 14px',
         border: '1px solid var(--dsw-alias-border-l1)',
-        background: 'var(--dsw-alias-bg-layer-1)',
+        borderRadius: '10px',
       },
+      groupTitle: { fontSize: '13px', fontWeight: 600, margin: 0 },
       row: {
-        display: 'flex',
-        alignItems: 'flex-start',
-        justifyContent: 'space-between',
-        gap: '16px',
+        display: 'grid',
+        gridTemplateColumns: 'minmax(120px, 180px) minmax(0, 1fr)',
+        alignItems: 'center',
+        columnGap: '12px',
+        rowGap: '4px',
       },
-      rowText: { display: 'flex', flexDirection: 'column', gap: '2px' },
-      label: { fontWeight: 500 },
-      hint: { margin: 0, color: 'var(--dsw-alias-label-secondary)', lineHeight: 1.5, fontSize: '12px' },
-      sectionTitle: { margin: 0, fontSize: '13px', fontWeight: 600 },
-      input: {
-        width: '120px',
-        padding: '6px 8px',
-        borderRadius: '6px',
-        border: '1px solid var(--dsw-alias-border-l2)',
+      label: { color: 'var(--dsw-alias-label-secondary)' },
+      control: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px', minWidth: 0 },
+      field: {
+        minWidth: '140px',
+        maxWidth: '220px',
+        flex: '1 1 140px',
         background: 'var(--dsw-alias-bg-base)',
         color: 'var(--dsw-alias-label-primary)',
-        fontSize: '13px',
+        border: '1px solid var(--dsw-alias-border-l1)',
+        borderRadius: '6px',
+        padding: '5px 8px',
+        font: 'inherit',
         fontVariantNumeric: 'tabular-nums',
       },
+      hint: { color: 'var(--dsw-alias-label-secondary)', margin: 0, gridColumn: '2 / -1' },
+      error: { color: 'var(--dsw-alias-state-error-primary)', margin: 0 },
+      ok: { color: 'var(--dsw-alias-state-success-primary)', margin: 0 },
       button: {
-        padding: '6px 12px',
-        borderRadius: '6px',
-        border: '1px solid var(--dsw-alias-border-l2)',
         background: 'var(--dsw-alias-bg-base)',
         color: 'var(--dsw-alias-label-primary)',
-        fontSize: '13px',
+        border: '1px solid var(--dsw-alias-border-l2)',
+        borderRadius: '6px',
+        padding: '5px 10px',
+        font: 'inherit',
         cursor: 'pointer',
-      },
-      primary: {
-        borderColor: 'var(--dsw-alias-brand-primary)',
-        color: 'var(--dsw-alias-brand-primary)',
       },
       danger: {
         borderColor: 'var(--dsw-alias-state-error-primary)',
@@ -220,47 +220,39 @@ window.__ModuleLoader__.load({
       table: { width: '100%', borderCollapse: 'collapse', fontSize: '13px' },
       th: {
         textAlign: 'left',
-        padding: '6px 8px',
+        padding: '5px 8px',
         fontWeight: 500,
         color: 'var(--dsw-alias-label-secondary)',
         borderBottom: '1px solid var(--dsw-alias-border-l1)',
         whiteSpace: 'nowrap',
       },
       td: {
-        padding: '8px',
+        padding: '7px 8px',
         borderBottom: '1px solid var(--dsw-alias-border-l1)',
         verticalAlign: 'middle',
       },
       mono: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '12px' },
-      pill: {
-        display: 'inline-block',
-        padding: '1px 8px',
-        borderRadius: '999px',
-        fontSize: '11px',
-        lineHeight: '18px',
-        whiteSpace: 'nowrap',
-      },
-      error: {
-        margin: 0,
-        padding: '8px 10px',
-        borderRadius: '6px',
-        color: 'var(--dsw-alias-state-error-primary)',
-        border: '1px solid var(--dsw-alias-state-error-primary)',
-        lineHeight: 1.5,
-      },
-      okText: { margin: 0, color: 'var(--dsw-alias-state-success-primary)', lineHeight: 1.5 },
-      actions: { display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center' },
       empty: {
         margin: 0,
-        padding: '16px',
+        padding: '14px',
         textAlign: 'center',
         color: 'var(--dsw-alias-label-secondary)',
         border: '1px dashed var(--dsw-alias-border-l2)',
         borderRadius: '8px',
       },
+      actions: { display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center' },
     }
 
-    /** A labelled toggle that behaves like the host's switches. */
+    /** One labeled field row. */
+    function Row({ label, hint, children }) {
+      return h('div', { style: styles.row },
+        h('span', { style: styles.label }, label),
+        h('div', { style: styles.control }, children),
+        hint === undefined ? null : h('p', { style: styles.hint }, hint),
+      )
+    }
+
+    /** A switch that behaves like the host's. */
     function Toggle({ checked, onChange, disabled, label }) {
       return h('button', {
         type: 'button',
@@ -276,13 +268,10 @@ window.__ModuleLoader__.load({
           height: '20px',
           padding: 0,
           borderRadius: '999px',
-          border: '1px solid ' + (checked
-            ? 'var(--dsw-alias-brand-primary)'
-            : 'var(--dsw-alias-border-l2)'),
+          border: `1px solid ${checked ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-border-l2)'}`,
           background: checked ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-bg-base)',
           cursor: disabled ? 'not-allowed' : 'pointer',
           opacity: disabled ? 0.6 : 1,
-          transition: 'background 120ms',
         },
       }, h('span', {
         'aria-hidden': true,
@@ -293,10 +282,7 @@ window.__ModuleLoader__.load({
           width: '14px',
           height: '14px',
           borderRadius: '50%',
-          background: checked
-            ? 'var(--dsw-alias-bg-base)'
-            : 'var(--dsw-alias-label-secondary)',
-          transition: 'left 120ms',
+          background: checked ? 'var(--dsw-alias-bg-base)' : 'var(--dsw-alias-label-secondary)',
         },
       }))
     }
@@ -304,14 +290,12 @@ window.__ModuleLoader__.load({
     /**
      * A token field that commits on blur or Enter, never per keystroke.
      *
-     * Every commit is a persisted configuration write, so saving as the user
-     * types would write the profile once per character.
+     * Each commit is a persisted write, so saving while the user types would
+     * write the profile once per character.
      */
     function TokenInput({ label, value, onCommit, disabled, style }) {
       const [text, setText] = React.useState(formatTokens(value))
       const [focused, setFocused] = React.useState(false)
-      // Re-sync from the Host whenever the saved value changes and the field is
-      // not being edited, so a save round-trip cannot leave stale text behind.
       React.useEffect(() => {
         if (!focused) setText(formatTokens(value))
       }, [value, focused])
@@ -331,7 +315,7 @@ window.__ModuleLoader__.load({
         value: text,
         disabled,
         'aria-label': label,
-        style: style ?? styles.input,
+        style: style ?? styles.field,
         onFocus: () => setFocused(true),
         onChange: event => setText(event.target.value),
         onBlur: () => { setFocused(false); commit() },
@@ -342,194 +326,182 @@ window.__ModuleLoader__.load({
       })
     }
 
-    /** One numeric field with a label and hint. */
-    function NumberField({ label, hint, value, onChange, disabled }) {
-      return h('div', { style: styles.row },
-        h('div', { style: styles.rowText },
-          h('span', { style: styles.label }, label),
-          h('p', { style: styles.hint }, hint),
-        ),
-        h(TokenInput, { label, value, onCommit: onChange, disabled }),
-      )
+    /** Resolve the `remote` gateway face that serves the model catalog. */
+    function remoteOf(ctx) {
+      for (const name of ['remote.session', 'remote']) {
+        let candidate
+        try {
+          candidate = ctx.get(name)
+        } catch {
+          candidate = undefined
+        }
+        if (candidate === undefined || candidate === null) continue
+        const session = candidate.session ?? candidate
+        if (typeof session?.modelCatalog === 'function') return session
+      }
+      return undefined
     }
 
-    /** The settings page. */
-    function SurchargeGuardSection({ t }) {
-      const [state, setState] = React.useState({ status: 'loading' })
-      const [models, setModels] = React.useState({ status: 'idle', rows: [] })
-      const [draft, setDraft] = React.useState(undefined)
+    /** Read the catalog into a flat, family-tagged list. */
+    async function loadCatalog(ctx) {
+      const remote = remoteOf(ctx)
+      if (remote === undefined) return { rows: [], reason: 'unavailable' }
+      const answer = await remote.modelCatalog()
+      if (answer === null || typeof answer !== 'object' || answer.ok !== true) {
+        return { rows: [], reason: answer?.error?.message ?? 'failed' }
+      }
+      const rows = []
+      const value = answer.value
+      // The gateway answers either a flat list or provider groups; accept both.
+      const groups = Array.isArray(value) ? value : Array.isArray(value?.providers) ? value.providers : []
+      for (const group of groups) {
+        const provider = group.provider ?? group.id
+        const providerName = group.providerName ?? group.name ?? provider
+        for (const model of group.models ?? []) {
+          const id = model.id ?? model.model
+          if (typeof provider !== 'string' || typeof id !== 'string') continue
+          const lower = id.toLowerCase()
+          const family = /(^|[-_/:])gpt/.test(lower)
+            ? 'gpt'
+            : lower.includes('gemini')
+              ? 'gemini'
+              : lower.includes('grok')
+                ? 'grok'
+                : null
+          rows.push({
+            provider,
+            providerName,
+            model: id,
+            name: model.name ?? id,
+            contextWindow: model.contextWindow ?? model.context?.contextWindow,
+            family,
+          })
+        }
+      }
+      return { rows, reason: undefined }
+    }
+
+    /** The card. */
+    function Panel({ t, ctx, form }) {
+      const snapshot = React.useSyncExternalStore(
+        listener => (form === undefined ? () => {} : form.subscribe(listener)),
+        () => (form === undefined ? EMPTY_SNAPSHOT : form.getSnapshot()),
+      )
+      const [catalog, setCatalog] = React.useState({ status: 'idle', rows: [] })
       const [notice, setNotice] = React.useState(undefined)
       const [busy, setBusy] = React.useState(false)
 
-      const load = React.useCallback(async () => {
-        setState({ status: 'loading' })
-        try {
-          const body = await fetchJson('/state')
-          setState({ status: 'ready', ...body })
-          setDraft(body.config)
-        } catch (error) {
-          setState({ status: 'failed', error: String(error.message ?? error) })
-        }
-      }, [])
+      const reloadCatalog = React.useCallback(() => {
+        setCatalog(current => ({ ...current, status: 'loading' }))
+        loadCatalog(ctx).then(
+          result => setCatalog({ status: 'ready', rows: result.rows, reason: result.reason }),
+          error => setCatalog({ status: 'failed', rows: [], reason: String(error?.message ?? error) }),
+        )
+      }, [ctx])
 
-      const loadModels = React.useCallback(async () => {
-        setModels(current => ({ ...current, status: 'loading' }))
-        try {
-          const body = await fetchJson('/models')
-          setModels({ status: 'ready', rows: body.models })
-        } catch (error) {
-          setModels({ status: 'failed', rows: [], error: String(error.message ?? error) })
-        }
-      }, [])
+      React.useEffect(() => { reloadCatalog() }, [reloadCatalog])
 
-      React.useEffect(() => { load() }, [load])
-      React.useEffect(() => { loadModels() }, [loadModels])
+      const writable = form !== undefined && snapshot.writable !== false
+      const enabled = fieldOf(snapshot, 'enabled', true) !== false
+      const margin = fieldOf(snapshot, 'safetyMarginTokens', 20000)
+      const maxAttempts = fieldOf(snapshot, 'maxAttempts', 2)
+      const rules = fieldOf(snapshot, 'rules', [])
 
-      const save = React.useCallback(async next => {
+      if (form === undefined) {
+        return h('p', { style: styles.error }, t('notWritable'))
+      }
+      if (snapshot.status !== undefined && snapshot.status !== 'ready' && snapshot.status !== 'unavailable') {
+        return h('p', { style: styles.error }, `${t('loadFailed')}: ${snapshot.status}`)
+      }
+
+      /** Persist one field, reporting a refusal instead of claiming success. */
+      const write = async (field, value) => {
         setBusy(true)
         setNotice(undefined)
         try {
-          const body = await fetchJson('/config', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(next),
-          })
-          setDraft(body.config)
-          setState(current => ({ ...current, config: body.config }))
-          setNotice({ kind: 'ok', text: t('saved') })
+          const accepted = await form.set(field, value)
+          if (accepted === false) setNotice({ kind: 'error', text: t('saveFailed') })
         } catch (error) {
-          setNotice({ kind: 'error', text: `${t('saveFailed')}: ${String(error.message ?? error)}` })
+          setNotice({ kind: 'error', text: `${t('saveFailed')}: ${String(error?.message ?? error)}` })
         } finally {
           setBusy(false)
         }
-      }, [t])
-
-      if (state.status === 'loading') {
-        return h('div', { style: styles.page }, h('p', { style: styles.hint }, t('loading')))
-      }
-      if (state.status === 'failed') {
-        return h('div', { style: styles.page },
-          h('p', { role: 'alert', style: styles.error }, `${t('loadFailed')}: ${state.error}`),
-          h('div', { style: styles.actions },
-            h('button', { type: 'button', style: styles.button, onClick: load }, t('retry')),
-          ),
-        )
       }
 
-      const config = draft ?? state.config
-      const writable = state.writable === true && !busy
-      const families = state.families ?? []
-      const familyLabel = family => t(`family${family.id.charAt(0).toUpperCase()}${family.id.slice(1)}`) || family.id
+      const ruleKey = rule => `${rule.provider}\u0000${rule.model}`
+      const ruleIndex = new Map(rules.map(rule => [ruleKey(rule), rule]))
 
-      /** Rule lookup by provider/model, so a table row knows if it is guarded. */
-      const ruleIndex = new Map(config.rules.map(rule => [`${rule.provider}\u0000${rule.model}`, rule]))
-
-      /** Add one rule if absent; keep an existing threshold. */
-      const withRule = (list, row, surchargeAtTokens) => {
-        const key = `${row.provider}\u0000${row.model}`
-        if (list.some(rule => `${rule.provider}\u0000${rule.model}` === key)) return list
-        return [...list, { provider: row.provider, model: row.model, surchargeAtTokens, enabled: true }]
-      }
-
-      /** Add every model of one family across all providers. */
+      /** Add every catalog model of one family that has no rule yet. */
       const addFamily = family => {
-        let next = config.rules
-        for (const row of models.rows) {
+        let next = [...rules]
+        for (const row of catalog.rows) {
           if (row.family !== family.id) continue
-          next = withRule(next, row, family.surchargeAtTokens)
+          if (next.some(rule => ruleKey(rule) === ruleKey(row))) continue
+          next = [...next, { provider: row.provider, model: row.model, surchargeAtTokens: family.surchargeAtTokens, enabled: true }]
         }
-        save({ ...config, rules: next })
+        if (next.length !== rules.length) void write('rules', next)
       }
 
-      /** Remove one rule. */
       const removeRule = rule => {
-        save({
-          ...config,
-          rules: config.rules.filter(entry => (
-            entry.provider !== rule.provider || entry.model !== rule.model
-          )),
-        })
+        void write('rules', rules.filter(entry => ruleKey(entry) !== ruleKey(rule)))
       }
 
-      /** Change one rule's threshold. */
       const setThreshold = (rule, surchargeAtTokens) => {
-        save({
-          ...config,
-          rules: config.rules.map(entry => (
-            entry.provider === rule.provider && entry.model === rule.model
-              ? { ...entry, surchargeAtTokens }
-              : entry
-          )),
-        })
+        void write('rules', rules.map(entry => (
+          ruleKey(entry) === ruleKey(rule) ? { ...entry, surchargeAtTokens } : entry
+        )))
       }
 
-      /** Toggle one rule. */
       const toggleRule = rule => {
-        save({
-          ...config,
-          rules: config.rules.map(entry => (
-            entry.provider === rule.provider && entry.model === rule.model
-              ? { ...entry, enabled: !entry.enabled }
-              : entry
-          )),
-        })
+        void write('rules', rules.map(entry => (
+          ruleKey(entry) === ruleKey(rule) ? { ...entry, enabled: !entry.enabled } : entry
+        )))
       }
 
-      const familyTables = families.map(family => {
-        const matched = models.rows.filter(row => row.family === family.id)
-        return h('button', {
-          key: family.id,
-          type: 'button',
-          disabled: !writable || matched.length === 0,
-          style: { ...styles.button, ...(matched.length === 0 ? { opacity: 0.5 } : {}) },
-          onClick: () => addFamily(family),
-        }, `${t('addFamily').replace('{family}', familyLabel(family))} (${matched.length})`)
-      })
+      const familyLabel = id => t(`family${id.charAt(0).toUpperCase()}${id.slice(1)}`)
 
-      const unguardedUnknown = models.rows.filter(row => (
-        row.family === null && !ruleIndex.has(`${row.provider}\u0000${row.model}`)
-      ))
-
-      return h('div', { style: styles.page },
+      return h('div', { style: styles.root },
         h('p', { style: styles.intro }, t('intro')),
         notice === undefined ? null : h('p', {
           role: notice.kind === 'error' ? 'alert' : undefined,
-          style: notice.kind === 'error' ? styles.error : styles.okText,
+          style: notice.kind === 'error' ? styles.error : styles.ok,
         }, notice.text),
-        writable ? null : h('p', { style: styles.hint }, t('notWritable')),
+        writable ? null : h('p', { style: styles.error }, t('notWritable')),
 
-        h('div', { style: styles.card },
+        h('div', { style: styles.group },
           h('div', { style: styles.row },
-            h('div', { style: styles.rowText },
-              h('span', { style: styles.label }, t('enabled')),
-              h('p', { style: styles.hint }, t('enabledHint')),
+            h('span', { style: styles.label }, t('enabled')),
+            h('div', { style: styles.control },
+              h(Toggle, {
+                label: t('enabled'),
+                checked: enabled,
+                disabled: !writable || busy,
+                onChange: next => write('enabled', next),
+              }),
             ),
-            h(Toggle, {
-              label: t('enabled'),
-              checked: config.enabled,
-              disabled: !writable,
-              onChange: next => save({ ...config, enabled: next }),
+            h('p', { style: styles.hint }, t('enabledHint')),
+          ),
+          h(Row, { label: t('margin'), hint: t('marginHint') },
+            h(TokenInput, {
+              label: t('margin'),
+              value: margin,
+              disabled: !writable || busy,
+              onCommit: next => write('safetyMarginTokens', next),
             }),
           ),
-          h(NumberField, {
-            label: t('margin'),
-            hint: t('marginHint'),
-            value: config.safetyMarginTokens,
-            disabled: !writable,
-            onChange: next => save({ ...config, safetyMarginTokens: next }),
-          }),
-          h(NumberField, {
-            label: t('maxAttempts'),
-            hint: t('maxAttemptsHint'),
-            value: config.maxAttempts,
-            disabled: !writable,
-            onChange: next => save({ ...config, maxAttempts: next }),
-          }),
+          h(Row, { label: t('maxAttempts'), hint: t('maxAttemptsHint') },
+            h(TokenInput, {
+              label: t('maxAttempts'),
+              value: maxAttempts,
+              disabled: !writable || busy,
+              onCommit: next => write('maxAttempts', next),
+            }),
+          ),
         ),
 
-        h('section', { style: { ...styles.card, gap: '10px' } },
-          h('h3', { style: styles.sectionTitle }, t('rules')),
-          config.rules.length === 0
+        h('div', { style: styles.group },
+          h('h4', { style: styles.groupTitle }, t('rules')),
+          rules.length === 0
             ? h('p', { style: styles.empty }, t('rulesEmpty'))
             : h('table', { style: styles.table },
                 h('thead', null, h('tr', null,
@@ -540,51 +512,41 @@ window.__ModuleLoader__.load({
                   h('th', { style: styles.th }, t('colStatus')),
                   h('th', { style: styles.th }, t('colActions')),
                 )),
-                h('tbody', null, config.rules.map(rule => {
-                  const row = models.rows.find(entry => (
+                h('tbody', null, rules.map(rule => {
+                  const row = catalog.rows.find(entry => (
                     entry.provider === rule.provider && entry.model === rule.model
                   ))
-                  const triggersAt = Math.max(1, rule.surchargeAtTokens - config.safetyMarginTokens)
-                  return h('tr', { key: `${rule.provider}\u0000${rule.model}` },
+                  const triggersAt = Math.max(1, rule.surchargeAtTokens - margin)
+                  return h('tr', { key: ruleKey(rule) },
                     h('td', { style: { ...styles.td, ...styles.mono } }, rule.provider),
                     h('td', { style: styles.td },
                       h('div', null, rule.model),
                       row?.contextWindow === undefined
                         ? null
-                        : h('div', { style: styles.hint },
+                        : h('div', { style: { ...styles.hint, gridColumn: 'auto' } },
                             `${t('colWindow')} ${formatTokens(row.contextWindow)}`),
                     ),
                     h('td', { style: styles.td },
                       h(TokenInput, {
                         label: `${t('colLine')} ${rule.model}`,
                         value: rule.surchargeAtTokens,
-                        disabled: !writable,
+                        disabled: !writable || busy,
                         onCommit: next => setThreshold(rule, next),
                       }),
                     ),
                     h('td', { style: { ...styles.td, ...styles.mono } }, formatTokens(triggersAt)),
-                    h('td', { style: styles.td },
-                      h('span', {
-                        style: {
-                          ...styles.pill,
-                          color: rule.enabled
-                            ? 'var(--dsw-alias-state-success-primary)'
-                            : 'var(--dsw-alias-label-secondary)',
-                          border: '1px solid currentColor',
-                        },
-                      }, rule.enabled ? t('on') : t('off')),
-                    ),
+                    h('td', { style: styles.td }, rule.enabled === false ? t('off') : t('on')),
                     h('td', { style: styles.td },
                       h('div', { style: styles.actions },
                         h('button', {
                           type: 'button',
-                          disabled: !writable,
+                          disabled: !writable || busy,
                           style: styles.button,
                           onClick: () => toggleRule(rule),
-                        }, rule.enabled ? t('off') : t('on')),
+                        }, rule.enabled === false ? t('on') : t('off')),
                         h('button', {
                           type: 'button',
-                          disabled: !writable,
+                          disabled: !writable || busy,
                           style: { ...styles.button, ...styles.danger },
                           onClick: () => removeRule(rule),
                         }, t('remove')),
@@ -593,50 +555,86 @@ window.__ModuleLoader__.load({
                   )
                 })),
               ),
-          notice === undefined ? null : null,
         ),
 
-        h('section', { style: { ...styles.card, gap: '10px' } },
-          h('h3', { style: styles.sectionTitle }, t('addTitle')),
-          h('p', { style: styles.hint }, t('addHint')),
-          models.status === 'loading'
-            ? h('p', { style: styles.hint }, t('scanning'))
-            : models.status === 'failed'
-              ? h('p', { role: 'alert', style: styles.error }, `${t('loadFailed')}: ${models.error}`)
-              : models.rows.length === 0
-                ? h('p', { style: styles.hint }, t('noModels'))
-                : null,
+        h('div', { style: styles.group },
+          h('h4', { style: styles.groupTitle }, t('addTitle')),
+          h('p', { style: { ...styles.intro, padding: 0 } }, t('addHint')),
+          catalog.status === 'loading' ? h('p', { style: styles.intro }, t('scanning')) : null,
+          catalog.status === 'failed'
+            ? h('p', { role: 'alert', style: styles.error }, `${t('loadFailed')}: ${catalog.reason}`)
+            : null,
+          catalog.status === 'ready' && catalog.rows.length === 0
+            ? h('p', { style: styles.intro }, catalog.reason === 'unavailable' ? t('noCatalog') : t('noModels'))
+            : null,
           h('div', { style: styles.actions },
-            ...familyTables,
+            ...FAMILIES.map(family => {
+              const matched = catalog.rows.filter(row => row.family === family.id)
+              return h('button', {
+                key: family.id,
+                type: 'button',
+                disabled: !writable || busy || matched.length === 0,
+                style: { ...styles.button, ...(matched.length === 0 ? { opacity: 0.5 } : {}) },
+                onClick: () => addFamily(family),
+              }, `${t('addFamily').replace('{family}', familyLabel(family.id))} (${matched.length})`)
+            }),
             h('button', {
               type: 'button',
-              disabled: !writable,
               style: styles.button,
-              onClick: loadModels,
+              onClick: reloadCatalog,
             }, t('scan')),
           ),
-          unguardedUnknown.length === 0 ? null : h('p', { style: styles.hint }, t('unknownFamily')),
         ),
       )
     }
 
+    /** The slot component. */
+    const Card = props => h(Panel, { t: props.t ?? clientCtx.locale.bind(NS), ctx, form: form() })
+
+    let cachedForm
+
+    /** Resolve this namespace's form handle once the service exists. */
+    function form() {
+      if (cachedForm !== undefined) return cachedForm
+      let service
+      try {
+        service = ctx.get('configForms')
+      } catch {
+        service = undefined
+      }
+      if (typeof service?.get !== 'function') return undefined
+      try {
+        cachedForm = service.get(NS)
+        return cachedForm
+      } catch {
+        return undefined
+      }
+    }
+
+    let ctx
+
     return {
       inject: ['slots', 'locale'],
-      /** Exposed for the render tests; the shell only reads `inject` and `apply`. */
-      __page: SurchargeGuardSection,
-      apply(ctx) {
-        // Dictionaries first, so the nav label resolves on the first render.
-        // `bind` is stable per namespace and reads the active locale at call
-        // time, so it can be handed to the component and used in render.
-        ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'surcharge-guard: dictionaries')
-        const t = ctx.locale.bind(NS)
+      /** Exposed for the render tests; the shell reads only `inject` and `apply`. */
+      __page: Panel,
+      apply(clientCtx) {
+        ctx = clientCtx
+        // Dictionaries first, so the card's text resolves on the first render.
+        clientCtx.effect(() => clientCtx.locale.register(NS, { zh, en }), 'surcharge-guard: dictionaries')
+        const t = clientCtx.locale.bind(NS)
 
-        ctx.slots.inject('settings.section', () => ctx.slots.register({
-          name: 'settings.section',
-          id: SECTION_ID,
-          order: 65,
-          label: () => t('nav'),
-        }, () => h(SurchargeGuardSection, { t })))
+        clientCtx.effect(() => () => {
+          void cachedForm?.dispose?.()
+          cachedForm = undefined
+        }, 'surcharge-guard: settings form')
+
+        // Keyed by this package's name: the card renders on this bundle's page in
+        // Plugins, between its description and its rows.
+        clientCtx.slots.inject('plugins.bundle.config', () => clientCtx.slots.register({
+          name: 'plugins.bundle.config',
+          key: NS,
+          locale: NS,
+        }, Card))
       },
     }
   },
