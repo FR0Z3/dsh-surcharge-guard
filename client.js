@@ -5,11 +5,11 @@
  * (`plugins.bundle.config`, keyed by this package's name), between the
  * description and the rows.
  *
- * State goes through the `configForms` service, so this half owns no HTTP route
- * and no duplicate copy of the config: a write lands in the same volatile fields
- * the Host half reads on the next step. The model catalog comes from the shared
- * `remote` gateway; when it is unavailable the same rules are still editable by
- * hand, and the card renders.
+ * The page owns the form: it passes a `ConfigPageForm` (`state` plus `mutate`),
+ * so this half keeps no configuration copy and owns no HTTP route. A write
+ * lands in the same volatile fields the Host half reads on the next step. The
+ * model catalog comes from the shared `remote` gateway; when it is unavailable
+ * the same rules are still editable by hand, and the card renders.
  *
  * @module dsh-surcharge-guard/client
  */
@@ -123,11 +123,10 @@ window.__ModuleLoader__.load({
       { id: 'grok', surchargeAtTokens: 200000 },
     ]
 
-    /** A form handle, as `configForms` exposes one per namespace. */
     // { getSnapshot(), subscribe(fn), set(field, value), dispose() }
 
-    /** Snapshot used before the form is reachable. */
-    const EMPTY_SNAPSHOT = { status: 'unavailable' }
+    /** Snapshot used when the page supplies no form (a summary render). */
+    const EMPTY_SNAPSHOT = { status: 'unavailable', writable: false, value: undefined }
 
     /** Compact a token count for display. */
     function formatTokens(value) {
@@ -381,12 +380,16 @@ window.__ModuleLoader__.load({
       return { rows, reason: undefined }
     }
 
-    /** The card. */
+    /**
+     * The card.
+     *
+     * The page owner hands over `form` as a `ConfigPageForm`:
+     * `{ state: ConfigFormSnapshot, mutate(ops, revision?) }`. `state` is a
+     * plain snapshot, not a subscribable store, so the page re-renders this
+     * entry itself when the namespace changes.
+     */
     function Panel({ t, ctx, form }) {
-      const snapshot = React.useSyncExternalStore(
-        listener => (form === undefined ? () => {} : form.subscribe(listener)),
-        () => (form === undefined ? EMPTY_SNAPSHOT : form.getSnapshot()),
-      )
+      const snapshot = form?.state ?? EMPTY_SNAPSHOT
       const [catalog, setCatalog] = React.useState({ status: 'idle', rows: [] })
       const [notice, setNotice] = React.useState(undefined)
       const [busy, setBusy] = React.useState(false)
@@ -401,25 +404,38 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => { reloadCatalog() }, [reloadCatalog])
 
-      const writable = form !== undefined && snapshot.writable !== false
+      const writable = form !== undefined && snapshot.writable === true
       const enabled = fieldOf(snapshot, 'enabled', true) !== false
       const margin = fieldOf(snapshot, 'safetyMarginTokens', 20000)
       const maxAttempts = fieldOf(snapshot, 'maxAttempts', 2)
       const rules = fieldOf(snapshot, 'rules', [])
 
+      // `view: 'summary'` is the collapsed one-liner; it needs no controls.
       if (form === undefined) {
         return h('p', { style: styles.error }, t('notWritable'))
       }
-      if (snapshot.status !== undefined && snapshot.status !== 'ready' && snapshot.status !== 'unavailable') {
-        return h('p', { style: styles.error }, `${t('loadFailed')}: ${snapshot.status}`)
+      if (snapshot.status === 'loading') {
+        return h('p', { style: styles.intro }, t('loading'))
+      }
+      if (snapshot.status === 'unavailable') {
+        return h('p', { style: styles.error }, t('notWritable'))
       }
 
-      /** Persist one field, reporting a refusal instead of claiming success. */
+      /**
+       * Persist one field, reporting a refusal instead of claiming success.
+       *
+       * One `set` op per field keeps the write atomic under the page's revision
+       * fence: a stale read is refused rather than overwriting a newer edit.
+       */
       const write = async (field, value) => {
+        if (form === undefined || typeof form.mutate !== 'function') {
+          setNotice({ kind: 'error', text: t('notWritable') })
+          return
+        }
         setBusy(true)
         setNotice(undefined)
         try {
-          const accepted = await form.set(field, value)
+          const accepted = await form.mutate([{ op: 'set', path: [field], value }])
           if (accepted === false) setNotice({ kind: 'error', text: t('saveFailed') })
         } catch (error) {
           setNotice({ kind: 'error', text: `${t('saveFailed')}: ${String(error?.message ?? error)}` })
@@ -588,45 +604,24 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** The slot component. */
-    const Card = props => h(Panel, { t: props.t ?? clientCtx.locale.bind(NS), ctx, form: form() })
+    /** The slot component: the page supplies `view` and the form. */
+    const Card = props => h(Panel, {
+      t: props.t ?? clientCtx.locale.bind(NS),
+      ctx: clientCtx,
+      form: props.form,
+    })
 
-    let cachedForm
-
-    /** Resolve this namespace's form handle once the service exists. */
-    function form() {
-      if (cachedForm !== undefined) return cachedForm
-      let service
-      try {
-        service = ctx.get('configForms')
-      } catch {
-        service = undefined
-      }
-      if (typeof service?.get !== 'function') return undefined
-      try {
-        cachedForm = service.get(NS)
-        return cachedForm
-      } catch {
-        return undefined
-      }
-    }
-
-    let ctx
+    let clientCtx
 
     return {
       inject: ['slots', 'locale'],
       /** Exposed for the render tests; the shell reads only `inject` and `apply`. */
       __page: Panel,
-      apply(clientCtx) {
-        ctx = clientCtx
+      apply(ctx) {
+        clientCtx = ctx
         // Dictionaries first, so the card's text resolves on the first render.
         clientCtx.effect(() => clientCtx.locale.register(NS, { zh, en }), 'surcharge-guard: dictionaries')
         const t = clientCtx.locale.bind(NS)
-
-        clientCtx.effect(() => () => {
-          void cachedForm?.dispose?.()
-          cachedForm = undefined
-        }, 'surcharge-guard: settings form')
 
         // Keyed by this package's name: the card renders on this bundle's page in
         // Plugins, between its description and its rows.

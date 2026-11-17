@@ -76,36 +76,28 @@ function findByProp(node, predicate, out = []) {
 }
 
 /**
- * A fake `configForms` handle.
+ * A fake `ConfigPageForm`, the shape the page hands this card.
  *
- * `getSnapshot()` must return the SAME object until something changes:
- * `useSyncExternalStore` compares by identity and re-renders forever when the
- * snapshot is rebuilt on every read.
+ * The real contract is `{ state: ConfigFormSnapshot, mutate(ops, revision?) }`:
+ * `state` is a plain snapshot the page refreshes itself, so the card never
+ * subscribes. `mutate` records the path ops a save would send.
  */
 function fakeForm(initial, { writable = true, status = 'ready' } = {}) {
   const value = { ...initial }
-  const listeners = new Set()
   const writes = []
-  let snapshot = { status, writable, value: { ...value } }
-  return {
+  const form = {
     value,
     writes,
-    set(field, next) {
-      writes.push({ field, value: next })
-      value[field] = next
-      snapshot = { ...snapshot, value: { ...value } }
-      for (const listener of listeners) listener()
+    state: { status, writable, value, base: undefined, user: undefined, revision: 1 },
+    mutate(ops) {
+      for (const op of ops) {
+        writes.push(op)
+        if (op.op === 'set') value[op.path[0]] = op.value
+      }
       return Promise.resolve(true)
     },
-    getSnapshot() {
-      return snapshot
-    },
-    subscribe(listener) {
-      listeners.add(listener)
-      return () => listeners.delete(listener)
-    },
-    dispose() {},
   }
+  return form
 }
 
 /** A fake client context exposing only what the card reads. */
@@ -153,7 +145,11 @@ async function mount(overrides = {}) {
   const ctx = overrides.ctx ?? fakeContext({ catalog: overrides.catalog ?? defaultCatalog, catalogs: overrides.catalogs })
   let root
   await TestRenderer.act(async () => {
-    root = TestRenderer.create(React.createElement(Panel, { t, ctx, form: overrides.noForm === true ? undefined : form }))
+    root = TestRenderer.create(React.createElement(Panel, {
+      t,
+      ctx,
+      form: overrides.noForm === true ? undefined : form,
+    }))
   })
   await settle()
   return { root, form }
@@ -192,7 +188,7 @@ test('clicking a family button writes one rule per missing model', async () => {
   await settle()
 
   assert.equal(form.writes.length, 1, 'exactly one write')
-  assert.equal(form.writes[0].field, 'rules')
+  assert.equal(form.writes[0].path[0], 'rules')
   const written = form.writes[0].value
   // gpt-6.1-sol already has a rule, so only gpt-6-astra is added.
   assert.equal(written.length, 2)
@@ -208,7 +204,7 @@ test('the master toggle writes the boolean field', async () => {
   await TestRenderer.act(async () => { toggle.props.onClick() })
   await settle()
 
-  assert.deepEqual(form.writes.at(-1), { field: 'enabled', value: false })
+  assert.deepEqual(form.writes.at(-1), { op: 'set', path: ['enabled'], value: false })
 })
 
 test('typing in a threshold field does not write per keystroke', async () => {
@@ -230,7 +226,7 @@ test('typing in a threshold field does not write per keystroke', async () => {
   await settle()
 
   assert.equal(form.writes.length, 1, 'one write on commit')
-  assert.equal(form.writes[0].field, 'rules')
+  assert.equal(form.writes[0].path[0], 'rules')
   assert.equal(form.writes[0].value[0].surchargeAtTokens, 300000)
 })
 
@@ -242,7 +238,7 @@ test('removing a rule writes the remaining list', async () => {
   assert.ok(remove, 'the remove control renders')
   await TestRenderer.act(async () => { remove.props.onClick() })
   await settle()
-  assert.deepEqual(form.writes.at(-1), { field: 'rules', value: [] })
+  assert.deepEqual(form.writes.at(-1), { op: 'set', path: ['rules'], value: [] })
 })
 
 test('reports not-writable when no form is reachable', async () => {
