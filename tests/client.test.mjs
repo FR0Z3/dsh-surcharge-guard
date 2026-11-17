@@ -101,10 +101,15 @@ function fakeForm(initial, { writable = true, status = 'ready' } = {}) {
 }
 
 /** A fake client context exposing only what the card reads. */
-function fakeContext({ catalog, catalogs = true } = {}) {
+function fakeContext({ catalog, catalogs = true, forms } = {}) {
   return {
     get(name) {
-      if (name === 'configForms') return undefined
+      if (name === 'configForms') {
+        if (forms === undefined) return undefined
+        // Mirrors the service: `get` always answers a form, whose snapshot says
+        // whether that namespace is actually served.
+        return { get: entryId => forms[entryId] ?? unservedForm() }
+      }
       if (name === 'remote.session' || name === 'remote') {
         if (!catalogs) return undefined
         return { modelCatalog: async () => ({ ok: true, value: catalog }) }
@@ -112,6 +117,12 @@ function fakeContext({ catalog, catalogs = true } = {}) {
       return undefined
     },
   }
+}
+
+/** A form for a namespace the host does not serve. */
+function unservedForm() {
+  const snapshot = { status: 'unavailable', writable: false, value: undefined, base: undefined, user: undefined, revision: undefined }
+  return { getSnapshot: () => snapshot, subscribe: () => () => {}, set: async () => false, mutate: async () => false }
 }
 
 const defaultConfig = {
@@ -319,4 +330,67 @@ test('the card is what the page view renders', async () => {
   await settle()
   const text = textsOf(root.toJSON()).join(' ')
   assert.ok(text.includes('colLine'), 'the page view carries the table')
+})
+
+// ---- namespace resolution --------------------------------------------------
+
+/**
+ * The bug these cover: `configForms` keys a form by its LOADER ENTRY ID, and a
+ * bundle composed through `dsh.profile.bundles` mounts under an `include:`
+ * wrapper. Looking up the bare package name found an unserved namespace, so the
+ * card reported "not writable" while the guard was fine.
+ */
+test('finds the served form behind the include: spelling', async () => {
+  const form = fakeForm(defaultConfig)
+  const ctx = fakeContext({ catalog: defaultCatalog, forms: { 'include:dsh-surcharge-guard': form } })
+  let root
+  await TestRenderer.act(async () => {
+    root = TestRenderer.create(React.createElement(Panel, { t, ctx }))
+  })
+  await settle()
+
+  const text = textsOf(root.toJSON()).join(' ')
+  assert.equal(text.includes('notWritable'), false, 'a served namespace is writable')
+  assert.ok(text.includes('gpt-6.1-sol'), 'the table renders from that namespace')
+
+  // And a write lands on the served form, not a fresh unserved handle.
+  const toggle = findByProp(root.toJSON(), props => props.role === 'switch')[0]
+  await TestRenderer.act(async () => { toggle.props.onClick() })
+  await settle()
+  assert.equal(form.writes.length, 1)
+})
+
+test('prefers the bare package name when the host serves that instead', async () => {
+  const bare = fakeForm(defaultConfig)
+  const ctx = fakeContext({ catalog: defaultCatalog, forms: { 'dsh-surcharge-guard': bare } })
+  let root
+  await TestRenderer.act(async () => {
+    root = TestRenderer.create(React.createElement(Panel, { t, ctx }))
+  })
+  await settle()
+  const text = textsOf(root.toJSON()).join(' ')
+  assert.equal(text.includes('notWritable'), false)
+  assert.ok(text.includes('gpt-6.1-sol'))
+})
+
+test('reports not-writable when no candidate namespace is served', async () => {
+  const ctx = fakeContext({ catalog: defaultCatalog, forms: {} })
+  let root
+  await TestRenderer.act(async () => {
+    root = TestRenderer.create(React.createElement(Panel, { t, ctx }))
+  })
+  await settle()
+  const text = textsOf(root.toJSON()).join(' ')
+  assert.ok(text.includes('notWritable'), `the refusal is surfaced (saw: ${text})`)
+})
+
+test('renders without any configForms service at all', async () => {
+  const ctx = fakeContext({ catalog: defaultCatalog, forms: undefined })
+  let root
+  await TestRenderer.act(async () => {
+    root = TestRenderer.create(React.createElement(Panel, { t, ctx }))
+  })
+  await settle()
+  const text = textsOf(root.toJSON()).join(' ')
+  assert.ok(text.includes('notWritable'))
 })

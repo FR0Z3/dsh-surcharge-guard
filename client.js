@@ -134,6 +134,17 @@ window.__ModuleLoader__.load({
     /** Snapshot used when the page supplies no form (a summary render). */
     const EMPTY_SNAPSHOT = { status: 'unavailable', writable: false, value: undefined }
 
+    /**
+     * Every namespace spelling this bundle may be mounted under.
+     *
+     * `configForms` keys a form by its **Loader entry id**, and the profile patch
+     * chooses that id, so the plugin has to ask rather than assume. A bundle
+     * pulled in through `dsh.profile.bundles` composes under an `include:` wrapper,
+     * which is what the live host uses here; the bare package name covers a
+     * directly-inserted row, and the declared name is the last resort.
+     */
+    const NAMESPACE_CANDIDATES = [NS, `include:${NS}`]
+
     /** Compact a token count for display. */
     function formatTokens(value) {
       if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
@@ -153,6 +164,23 @@ window.__ModuleLoader__.load({
       const scale = match[2] === 'm' ? 1000000 : match[2] === 'k' ? 1000 : 1
       const parsed = Math.round(base * scale)
       return parsed > 0 ? parsed : undefined
+    }
+
+    /**
+     * Read a snapshot from either form shape this card may receive.
+     *
+     * The bundle page hands a `ConfigPageForm` (`{ state, mutate }`) while the
+     * shared service returns a `ConfigForm` (`getSnapshot`, `set`). Both describe
+     * the same namespace, so one reader accepts both.
+     *
+     * @param form - either handle, or `undefined`.
+     * @returns the snapshot, or the unserved one.
+     */
+    function snapshotOf(form) {
+      if (form === undefined) return EMPTY_SNAPSHOT
+      if (form.state !== undefined) return form.state
+      if (typeof form.getSnapshot === 'function') return form.getSnapshot()
+      return EMPTY_SNAPSHOT
     }
 
     /** Whether a value is a live (volatile) reference and not a plain value. */
@@ -395,7 +423,8 @@ window.__ModuleLoader__.load({
      * entry itself when the namespace changes.
      */
     function Panel({ t, ctx, form }) {
-      const snapshot = form?.state ?? EMPTY_SNAPSHOT
+      const resolved = form ?? formFor(ctx)
+      const snapshot = snapshotOf(resolved)
       const [catalog, setCatalog] = React.useState({ status: 'idle', rows: [] })
       const [notice, setNotice] = React.useState(undefined)
       const [busy, setBusy] = React.useState(false)
@@ -410,14 +439,13 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => { reloadCatalog() }, [reloadCatalog])
 
-      const writable = form !== undefined && snapshot.writable === true
+      const writable = snapshot.writable === true
       const enabled = fieldOf(snapshot, 'enabled', true) !== false
       const margin = fieldOf(snapshot, 'safetyMarginTokens', 20000)
       const maxAttempts = fieldOf(snapshot, 'maxAttempts', 2)
       const rules = fieldOf(snapshot, 'rules', [])
 
-      // `view: 'summary'` is the collapsed one-liner; it needs no controls.
-      if (form === undefined) {
+      if (resolved === undefined) {
         return h('p', { style: styles.error }, t('notWritable'))
       }
       if (snapshot.status === 'loading') {
@@ -434,14 +462,16 @@ window.__ModuleLoader__.load({
        * fence: a stale read is refused rather than overwriting a newer edit.
        */
       const write = async (field, value) => {
-        if (form === undefined || typeof form.mutate !== 'function') {
+        if (resolved === undefined) {
           setNotice({ kind: 'error', text: t('notWritable') })
           return
         }
         setBusy(true)
         setNotice(undefined)
         try {
-          const accepted = await form.mutate([{ op: 'set', path: [field], value }])
+          const accepted = typeof resolved.set === 'function'
+            ? await resolved.set(field, value)
+            : await resolved.mutate([{ op: 'set', path: [field], value }])
           if (accepted === false) setNotice({ kind: 'error', text: t('saveFailed') })
         } catch (error) {
           setNotice({ kind: 'error', text: `${t('saveFailed')}: ${String(error?.message ?? error)}` })
@@ -620,7 +650,7 @@ window.__ModuleLoader__.load({
      */
     const Card = props => {
       const t = props.t ?? clientCtx.locale.bind(NS)
-      if (props.view === 'summary') return h(Summary, { t, form: props.form })
+      if (props.view === 'summary') return h(Summary, { t, ctx: clientCtx, form: props.form })
       return h(Panel, { t, ctx: clientCtx, form: props.form })
     }
 
@@ -630,8 +660,9 @@ window.__ModuleLoader__.load({
      * States the guard's current posture in one sentence, so the list answers
      * "is this on, and how many models are guarded" without opening the page.
      */
-    function Summary({ t, form }) {
-      const snapshot = form?.state ?? EMPTY_SNAPSHOT
+    function Summary({ t, form, ctx }) {
+      const resolved = form ?? formFor(ctx)
+      const snapshot = snapshotOf(resolved)
       if (snapshot.status === 'loading') return h('span', null, t('loading'))
       if (snapshot.status !== 'ready') return h('span', null, t('notWritable'))
       if (fieldOf(snapshot, 'enabled', true) === false) return h('span', null, t('summaryOff'))
@@ -642,6 +673,40 @@ window.__ModuleLoader__.load({
     }
 
     let clientCtx
+
+    /**
+     * Find the shared form for whichever namespace this bundle is mounted under.
+     *
+     * The service is read through `ctx.get` on every apply rather than cached at
+     * module scope: the settings provider may activate after this bundle.
+     *
+     * @param ctx - the client context.
+     * @returns the form, or `undefined` when no candidate namespace is served.
+     */
+    function formFor(ctx) {
+      let service
+      try {
+        service = ctx.get('configForms')
+      } catch {
+        service = undefined
+      }
+      if (typeof service?.get !== 'function') return undefined
+      for (const name of NAMESPACE_CANDIDATES) {
+        try {
+          const candidate = service.get(name)
+          // An unserved namespace still yields a form; its snapshot says so.
+          if (snapshotOf(candidate).status !== 'unavailable') return candidate
+        } catch {
+          // Try the next spelling.
+        }
+      }
+      // Nothing served: return the first candidate so the card can explain why.
+      try {
+        return service.get(NAMESPACE_CANDIDATES[0])
+      } catch {
+        return undefined
+      }
+    }
 
     return {
       inject: ['slots', 'locale'],
