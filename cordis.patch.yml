@@ -1,0 +1,16 @@
+# Surcharge guard: compact before a model crosses its double-billing line.
+#
+# The row id doubles as the settings namespace the Client settings page edits,
+# so keep it identical to the package name.
+#
+# Every field is volatile: the settings page writes them and a toggle must take
+# effect on the next step rather than restarting the plugin mid-session.
+- insert:
+    - id: dsh-surcharge-guard
+      name: 'dsh-surcharge-guard'
+      config:
+        enabled: true
+        rules: []
+        safetyMarginTokens: 20000
+        retainRatio: 0.16
+        maxAttempts: 2
