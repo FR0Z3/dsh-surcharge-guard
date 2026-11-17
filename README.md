@@ -87,11 +87,12 @@ headroom = W − output − (起点 − 安全余量)
 
 ```
 pnpm install
-pnpm check          # 语法 + 本地化一致性 + 单元测试
-pnpm test           # 只跑单元测试
+pnpm check          # 语法 + 本地化一致性 + 全部测试
+pnpm test           # 只跑测试
 ```
 
 - `logic.js` 是不依赖任何运行时的纯函数模块，`tests/logic.test.mjs` 直接测它。
+- `tests/client.test.mjs` 用 `react-test-renderer` 加桩 `fetch` 挂载设置页，检查表格、批量添加、提交时机和失败态。
 - `index.js` 是 Host 半边：注册 `agent/pre-step`，并提供三个同源路由给设置页读写。
 - `client.js` 是浏览器半边，注册一个 `settings.section` 页面；所有状态都在 Host，页面只做拉取、渲染、回写。
 - `locale/*.json` 是 Plugin Manager 读的显示文案；界面字符串在 `client.js` 里内联一份，`scripts/check-locale.mjs` 保证两份不漂移。

@@ -87,11 +87,12 @@ The cut rewinds to the nearest tool-pairing balanced position, and a leading sys
 
 ```
 pnpm install
-pnpm check          # syntax + locale consistency + unit tests
-pnpm test           # unit tests only
+pnpm check          # syntax + locale consistency + all tests
+pnpm test           # tests only
 ```
 
 - `logic.js` is a pure, dependency-free module; `tests/logic.test.mjs` tests it directly.
+- `tests/client.test.mjs` mounts the settings page with `react-test-renderer` and a stubbed `fetch`, covering the table, bulk add, commit timing and failure states.
 - `index.js` is the Host half: it registers `agent/pre-step` and three same-origin routes for the settings page.
 - `client.js` is the browser half, registering one `settings.section` page. All state lives in the Host; the page only fetches, renders and posts edits.
 - `locale/*.json` holds the display text Plugin Manager reads; the UI strings are inlined in `client.js`, and `scripts/check-locale.mjs` keeps the two copies in step.

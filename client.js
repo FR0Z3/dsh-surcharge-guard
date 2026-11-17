@@ -301,33 +301,55 @@ window.__ModuleLoader__.load({
       }))
     }
 
+    /**
+     * A token field that commits on blur or Enter, never per keystroke.
+     *
+     * Every commit is a persisted configuration write, so saving as the user
+     * types would write the profile once per character.
+     */
+    function TokenInput({ label, value, onCommit, disabled, style }) {
+      const [text, setText] = React.useState(formatTokens(value))
+      const [focused, setFocused] = React.useState(false)
+      // Re-sync from the Host whenever the saved value changes and the field is
+      // not being edited, so a save round-trip cannot leave stale text behind.
+      React.useEffect(() => {
+        if (!focused) setText(formatTokens(value))
+      }, [value, focused])
+
+      const commit = () => {
+        const parsed = parseTokens(text)
+        if (parsed === undefined || parsed === value) {
+          setText(formatTokens(value))
+          return
+        }
+        onCommit(parsed)
+      }
+
+      return h('input', {
+        type: 'text',
+        inputMode: 'numeric',
+        value: text,
+        disabled,
+        'aria-label': label,
+        style: style ?? styles.input,
+        onFocus: () => setFocused(true),
+        onChange: event => setText(event.target.value),
+        onBlur: () => { setFocused(false); commit() },
+        onKeyDown: event => {
+          if (event.key !== 'Enter') return
+          event.currentTarget.blur()
+        },
+      })
+    }
+
     /** One numeric field with a label and hint. */
     function NumberField({ label, hint, value, onChange, disabled }) {
-      const [text, setText] = React.useState(String(value))
-      React.useEffect(() => setText(String(value)), [value])
       return h('div', { style: styles.row },
         h('div', { style: styles.rowText },
           h('span', { style: styles.label }, label),
           h('p', { style: styles.hint }, hint),
         ),
-        h('input', {
-          type: 'text',
-          inputMode: 'numeric',
-          value: text,
-          disabled,
-          'aria-label': label,
-          style: styles.input,
-          onChange: event => {
-            setText(event.target.value)
-            const parsed = parseTokens(event.target.value)
-            if (parsed !== undefined) onChange(parsed)
-          },
-          onBlur: () => {
-            const parsed = parseTokens(text)
-            if (parsed === undefined) setText(String(value))
-            else onChange(parsed)
-          },
-        }),
+        h(TokenInput, { label, value, onCommit: onChange, disabled }),
       )
     }
 
@@ -533,17 +555,11 @@ window.__ModuleLoader__.load({
                             `${t('colWindow')} ${formatTokens(row.contextWindow)}`),
                     ),
                     h('td', { style: styles.td },
-                      h('input', {
-                        type: 'text',
-                        inputMode: 'numeric',
-                        defaultValue: formatTokens(rule.surchargeAtTokens),
-                        'aria-label': t('colLine'),
+                      h(TokenInput, {
+                        label: `${t('colLine')} ${rule.model}`,
+                        value: rule.surchargeAtTokens,
                         disabled: !writable,
-                        style: styles.input,
-                        onChange: event => {
-                          const parsed = parseTokens(event.target.value)
-                          if (parsed !== undefined) setThreshold(rule, parsed)
-                        },
+                        onCommit: next => setThreshold(rule, next),
                       }),
                     ),
                     h('td', { style: { ...styles.td, ...styles.mono } }, formatTokens(triggersAt)),
@@ -606,6 +622,8 @@ window.__ModuleLoader__.load({
 
     return {
       inject: ['slots', 'locale'],
+      /** Exposed for the render tests; the shell only reads `inject` and `apply`. */
+      __page: SurchargeGuardSection,
       apply(ctx) {
         // Dictionaries first, so the nav label resolves on the first render.
         // `bind` is stable per namespace and reads the active locale at call
