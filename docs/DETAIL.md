@@ -30,8 +30,7 @@ Setting the window to 272K does not fire at 272K; it fires at 78K, because
 `W − output − headroom` collapses. And `W × 0.8` caps the trigger at 217,600, so
 a 272K window can never trigger near 272K at all.
 
-Writing the threshold directly inverts the arithmetic. The plugin solves for the
-headroom that lands the trigger where you asked:
+Writing the threshold directly inverts the arithmetic:
 
 ```
 headroom = W − output − (line − safetyMargin)
@@ -55,9 +54,15 @@ Only the guard's own threshold is written; the window keeps its real capacity.
 Before each step the guard reads the step's routed model. If a rule matches and
 the measured context is within `safetyMargin` of the line, it selects a
 tool-pairing-balanced span and asks the session's compaction service to fold it
-into one summary. A cut that would split an assistant tool call from its result
-is rewinded to the nearest balanced position; a leading system message is never
-inside the span.
+into one summary.
+
+The compaction service that governs an Agent is resolved through the preset
+registry, because the shipped preset mounts `compaction` inside an isolated realm
+where the root realm cannot see it. A root-level fallback covers profiles that
+mount it globally.
+
+A cut that would split an assistant tool call from its result is rewinded to the
+nearest balanced position; a leading system message is never inside the span.
 
 The guard writes no new session event type and replaces no service. The only
 durable writes are the ordinary `compaction/start` .. `compaction/end` pair that
@@ -78,3 +83,7 @@ do without the plugin.
 - **Summaries can refuse to shrink.** When a region is already dense, the
   summarizer may return text that is not smaller than what it replaces. The retry
   limit stops it from being attempted on every step of the same turn.
+- **The rendered page is verified by render tests, not by eye.** The settings page
+  is mounted in `tests/client.test.mjs` with a stubbed Host, which covers the
+  table, the bulk add and the failure states, but a live screenshot still needs a
+  logged-in browser.
