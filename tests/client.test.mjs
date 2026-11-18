@@ -101,14 +101,16 @@ function fakeForm(initial, { writable = true, status = 'ready' } = {}) {
 }
 
 /** A fake client context exposing only what the card reads. */
-function fakeContext({ catalog, catalogs = true, forms } = {}) {
+function fakeContext({ catalog, catalogs = true, forms, declared } = {}) {
   return {
     get(name) {
       if (name === 'configForms') {
-        if (forms === undefined) return undefined
+        if (forms === undefined && declared === undefined) return undefined
         // Mirrors the service: `get` always answers a form, whose snapshot says
         // whether that namespace is actually served.
-        return { get: entryId => forms[entryId] ?? unservedForm() }
+        const table = { ...(forms ?? {}) }
+        if (declared !== undefined) table['include:llm-pi-ai'] = declaredForm(declared)
+        return { get: entryId => table[entryId] ?? unservedForm() }
       }
       if (name === 'remote.session' || name === 'remote') {
         if (!catalogs) return undefined
@@ -116,6 +118,18 @@ function fakeContext({ catalog, catalogs = true, forms } = {}) {
       }
       return undefined
     },
+  }
+}
+
+/** A form exposing a provider document, as `llm-pi-ai` does. */
+function declaredForm(providers) {
+  const snapshot = { status: 'ready', writable: false, value: { providers }, base: undefined, user: undefined, revision: 1 }
+  return {
+    state: snapshot,
+    getSnapshot: () => snapshot,
+    subscribe: () => () => {},
+    set: async () => false,
+    mutate: async () => false,
   }
 }
 
@@ -133,19 +147,25 @@ const defaultConfig = {
   maxAttempts: 2,
 }
 
-const defaultCatalog = [
-  {
-    provider: 'codex',
-    providerName: 'Codex',
-    models: [
-      { id: 'gpt-6.1-sol', name: 'GPT 6.1 Sol', contextWindow: 450000 },
-      { id: 'gpt-6-astra', name: 'GPT 6 Astra', contextWindow: 1050000 },
-    ],
-  },
-  { provider: 'gem', providerName: 'Gem', models: [{ id: 'gemini-3-pro', name: 'Gemini 3 Pro', contextWindow: 1000000 }] },
-  { provider: 'x', providerName: 'X', models: [{ id: 'grok-4', name: 'Grok 4', contextWindow: 1000000 }] },
-  { provider: 'd', providerName: 'DeepSeek', models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }] },
-]
+/**
+ * The real `ModelCatalog` shape the Host answers: `{ groups, failures, ... }`
+ * with `{ id, name, models }` per group. Provider model metadata carries no
+ * context window, so the fixture has none either.
+ */
+const defaultCatalog = {
+  default: { provider: 'codex', model: 'gpt-6.1-sol' },
+  routableProviders: ['codex', 'gem', 'x', 'd'],
+  groups: [
+    { id: 'codex', name: 'Codex', models: [
+      { id: 'gpt-6.1-sol', name: 'GPT 6.1 Sol' },
+      { id: 'gpt-6-astra', name: 'GPT 6 Astra' },
+    ] },
+    { id: 'gem', name: 'Gem', models: [{ id: 'gemini-3-pro', name: 'Gemini 3 Pro' }] },
+    { id: 'x', name: 'X', models: [{ id: 'grok-4', name: 'Grok 4' }] },
+    { id: 'd', name: 'DeepSeek', models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }] },
+  ],
+  failures: [],
+}
 
 /** Key-echoing translator, so assertions name keys rather than copy. */
 const t = key => key
@@ -153,7 +173,11 @@ const t = key => key
 /** Mount the card. */
 async function mount(overrides = {}) {
   const form = overrides.form ?? fakeForm(overrides.config ?? defaultConfig, overrides.formOptions)
-  const ctx = overrides.ctx ?? fakeContext({ catalog: overrides.catalog ?? defaultCatalog, catalogs: overrides.catalogs })
+  const ctx = overrides.ctx ?? fakeContext({
+    catalog: overrides.catalog ?? defaultCatalog,
+    catalogs: overrides.catalogs,
+    declared: overrides.declared,
+  })
   let root
   await TestRenderer.act(async () => {
     root = TestRenderer.create(React.createElement(Panel, {
@@ -173,10 +197,8 @@ test('renders the rule table with the model, its line and its trigger point', as
   assert.ok(text.includes('272K'), 'the line is shown')
   // 272000 - 20000 margin = 252000 -> "252K"
   assert.ok(text.includes('252K'), `trigger point is shown (saw: ${text.join(' | ')})`)
-  assert.ok(
-    text.some(entry => entry.includes('colWindow') && entry.includes('450K')),
-    `the context window is shown (saw: ${text.join(' | ')})`,
-  )
+  // The catalog carries no context window, so the card must not invent one.
+  assert.equal(text.some(entry => entry.includes('colWindow')), false)
 })
 
 test('renders one quick-add button per family, counting matches', async () => {
@@ -393,4 +415,141 @@ test('renders without any configForms service at all', async () => {
   await settle()
   const text = textsOf(root.toJSON()).join(' ')
   assert.ok(text.includes('notWritable'))
+})
+
+// ---- catalog shape ---------------------------------------------------------
+
+/**
+ * The bug these cover: the Host answers `ModelCatalog` with `groups`, while the
+ * card parsed a `providers` key. The list was always empty, and the page told
+ * the user to configure a provider that was already configured.
+ */
+test('reads models out of the catalog groups shape', async () => {
+  const { root } = await mount()
+  const labels = findByProp(root.toJSON(), props => typeof props.onClick === 'function')
+    .map(node => textsOf(node).join(''))
+  const gpt = labels.find(label => label.includes('addFamily') && label.includes('(2)'))
+  assert.ok(gpt, `the groups shape yields both GPT models (saw: ${labels.join(' | ')})`)
+})
+
+test('names the providers that failed instead of denying they exist', async () => {
+  const ctx = {
+    get(name) {
+      if (name === 'remote.session' || name === 'remote') {
+        return {
+          modelCatalog: async () => ({
+            ok: true,
+            value: {
+              groups: [],
+              failures: [{ id: 'codex', name: 'Codex', message: 'unauthorized' }],
+            },
+          }),
+        }
+      }
+      return undefined
+    },
+  }
+  const { root } = await mount({ ctx })
+  const text = textsOf(root.toJSON()).join(' ')
+  assert.ok(text.includes('noModels'), 'the empty state is stated')
+  assert.ok(text.includes('unauthorized'), `the provider failure is named (saw: ${text})`)
+})
+
+test('an empty catalog with no failures stays a plain empty state', async () => {
+  const ctx = {
+    get(name) {
+      if (name === 'remote.session' || name === 'remote') {
+        return { modelCatalog: async () => ({ ok: true, value: { groups: [], failures: [] } }) }
+      }
+      return undefined
+    },
+  }
+  const { root } = await mount({ ctx })
+  const text = textsOf(root.toJSON()).join(' ')
+  assert.ok(text.includes('noModels'))
+  assert.equal(text.includes('undefined'), false, 'no undefined leaks into the copy')
+})
+
+// ---- declared vs live models -----------------------------------------------
+
+/**
+ * The bug these cover: the live catalog lists only providers whose adapter is
+ * registered. A provider configured without a usable key is absent from it
+ * entirely, so the card said "no models" for models the user could see in
+ * Settings -> Models. The settings document also carries the context window,
+ * which the live catalog omits.
+ */
+const declaredProviders = {
+  'codex-everywhere-plus-pool': {
+    displayName: 'Codex Plus',
+    models: [
+      { id: 'gpt-6.1-sol', name: 'GPT 6.1 Sol', contextWindow: 450000, maxTokens: 128000 },
+      { id: 'gpt-6-astra', name: 'GPT 6 Astra', contextWindow: 1050000, maxTokens: 128000 },
+    ],
+  },
+  'gem-pool': { models: [{ id: 'gemini-3-pro', contextWindow: 1000000 }] },
+}
+
+test('finds declared models whose provider is not registered', async () => {
+  // The live catalog is empty: every provider is dormant.
+  const ctx = fakeContext({
+    declared: declaredProviders,
+    catalog: { groups: [], failures: [] },
+  })
+  const { root } = await mount({ ctx })
+  const labels = findByProp(root.toJSON(), props => typeof props.onClick === 'function')
+    .map(node => textsOf(node).join(''))
+  assert.ok(
+    labels.some(label => label.includes('addFamily') && label.includes('(2)')),
+    `both declared GPT models are offered (saw: ${labels.join(' | ')})`,
+  )
+})
+
+test('the declared source restores the context window', async () => {
+  const ctx = fakeContext({ declared: declaredProviders, catalog: { groups: [], failures: [] } })
+  const { root } = await mount({
+    ctx,
+    config: {
+      ...defaultConfig,
+      rules: [{ provider: 'codex-everywhere-plus-pool', model: 'gpt-6.1-sol', surchargeAtTokens: 272000, enabled: true }],
+    },
+  })
+  const text = textsOf(root.toJSON()).join(' ')
+  assert.ok(text.includes('450K'), `the window is shown (saw: ${text})`)
+  assert.ok(text.includes('dormant'), 'and the inactive provider is named as such')
+})
+
+test('a live model carries no dormant marker', async () => {
+  const ctx = fakeContext({
+    declared: declaredProviders,
+    catalog: {
+      groups: [{ id: 'codex-everywhere-plus-pool', name: 'Codex Plus', models: [{ id: 'gpt-6.1-sol', name: 'GPT 6.1 Sol' }] }],
+      failures: [],
+    },
+  })
+  const { root } = await mount({
+    ctx,
+    config: {
+      ...defaultConfig,
+      rules: [{ provider: 'codex-everywhere-plus-pool', model: 'gpt-6.1-sol', surchargeAtTokens: 272000, enabled: true }],
+    },
+  })
+  const text = textsOf(root.toJSON()).join(' ')
+  assert.equal(text.includes('dormant'), false, 'a routable model is not marked dormant')
+  assert.ok(text.includes('450K'), 'the window still comes from the declared side')
+})
+
+test('the live catalog and declared config merge without duplicating a model', async () => {
+  const ctx = fakeContext({
+    declared: declaredProviders,
+    catalog: {
+      groups: [{ id: 'codex-everywhere-plus-pool', name: 'Codex Plus', models: [{ id: 'gpt-6.1-sol', name: 'GPT 6.1 Sol' }] }],
+      failures: [],
+    },
+  })
+  const { root } = await mount({ ctx })
+  const labels = findByProp(root.toJSON(), props => typeof props.onClick === 'function')
+    .map(node => textsOf(node).join(''))
+  // Two distinct GPT ids: gpt-6.1-sol appears in both sources but counts once.
+  assert.ok(labels.some(label => label.includes('(2)')), `no duplicate rows (saw: ${labels.join(' | ')})`)
 })

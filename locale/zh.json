@@ -49,5 +49,6 @@
   "noCatalog": "未读取到模型目录，请确认服务商已配置；规则仍可手动添加。",
   "summaryOff": "计费保护已关闭",
   "summaryNoRules": "已启用，还没有规则",
-  "summaryOn": "正在保护 {count} 个模型"
+  "summaryOn": "正在保护 {count} 个模型",
+  "dormant": "服务商当前未激活"
 }

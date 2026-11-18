@@ -49,5 +49,6 @@
   "noCatalog": "The model catalog is unavailable. Check that a provider is configured; rules can still be added by hand.",
   "summaryOff": "Surcharge guard is off",
   "summaryNoRules": "On, no rules yet",
-  "summaryOn": "Guarding {count} models"
+  "summaryOn": "Guarding {count} models",
+  "dormant": "provider not active"
 }

@@ -69,7 +69,8 @@ window.__ModuleLoader__.load({
       "noCatalog": "未读取到模型目录，请确认服务商已配置；规则仍可手动添加。",
       "summaryOff": "计费保护已关闭",
       "summaryNoRules": "已启用，还没有规则",
-      "summaryOn": "正在保护 {count} 个模型"
+      "summaryOn": "正在保护 {count} 个模型",
+      "dormant": "服务商当前未激活"
 }
 
     const en = {
@@ -118,7 +119,8 @@ window.__ModuleLoader__.load({
       "noCatalog": "The model catalog is unavailable. Check that a provider is configured; rules can still be added by hand.",
       "summaryOff": "Surcharge guard is off",
       "summaryNoRules": "On, no rules yet",
-      "summaryOn": "Guarding {count} models"
+      "summaryOn": "Guarding {count} models",
+      "dormant": "provider not active"
 }
 
 
@@ -375,43 +377,128 @@ window.__ModuleLoader__.load({
       return undefined
     }
 
-    /** Read the catalog into a flat, family-tagged list. */
-    async function loadCatalog(ctx) {
-      const remote = remoteOf(ctx)
-      if (remote === undefined) return { rows: [], reason: 'unavailable' }
-      const answer = await remote.modelCatalog()
-      if (answer === null || typeof answer !== 'object' || answer.ok !== true) {
-        return { rows: [], reason: answer?.error?.message ?? 'failed' }
+    /**
+     * Classify a model id into a documented family.
+     * @param id - provider-owned model id.
+     * @returns the family id, or `null` when no threshold is documented.
+     */
+    function familyOf(id) {
+      const lower = String(id).toLowerCase()
+      if (/(^|[-_/:])gpt/.test(lower)) return 'gpt'
+      if (lower.includes('gemini')) return 'gemini'
+      if (lower.includes('grok')) return 'grok'
+      return null
+    }
+
+    /** Namespaces the provider configuration may be mounted under. */
+    const PROVIDER_NAMESPACES = ['llm-pi-ai', 'include:llm-pi-ai']
+
+    /**
+     * Read the models the user declared in Settings -> Models.
+     *
+     * The live catalog lists only providers whose adapter is currently
+     * registered, so a provider with no key is invisible there even though its
+     * models are configured and their thresholds still matter. The settings
+     * document is the declarative source, and it alone carries `contextWindow`.
+     *
+     * @param ctx - the client context.
+     * @returns declared models keyed by `provider` NUL `model`.
+     */
+    function declaredModels(ctx) {
+      const out = new Map()
+      let service
+      try {
+        service = ctx.get('configForms')
+      } catch {
+        return out
       }
-      const rows = []
-      const value = answer.value
-      // The gateway answers either a flat list or provider groups; accept both.
-      const groups = Array.isArray(value) ? value : Array.isArray(value?.providers) ? value.providers : []
-      for (const group of groups) {
-        const provider = group.provider ?? group.id
-        const providerName = group.providerName ?? group.name ?? provider
-        for (const model of group.models ?? []) {
-          const id = model.id ?? model.model
-          if (typeof provider !== 'string' || typeof id !== 'string') continue
-          const lower = id.toLowerCase()
-          const family = /(^|[-_/:])gpt/.test(lower)
-            ? 'gpt'
-            : lower.includes('gemini')
-              ? 'gemini'
-              : lower.includes('grok')
-                ? 'grok'
-                : null
-          rows.push({
-            provider,
-            providerName,
-            model: id,
-            name: model.name ?? id,
-            contextWindow: model.contextWindow ?? model.context?.contextWindow,
-            family,
-          })
+      if (typeof service?.get !== 'function') return out
+      for (const name of PROVIDER_NAMESPACES) {
+        let snapshot
+        try {
+          snapshot = snapshotOf(service.get(name))
+        } catch {
+          continue
+        }
+        if (snapshot.status !== 'ready') continue
+        const providers = snapshot.value?.providers
+        if (providers === null || typeof providers !== 'object') continue
+        for (const [provider, profile] of Object.entries(providers)) {
+          for (const model of profile?.models ?? []) {
+            if (typeof model?.id !== 'string') continue
+            out.set(`${provider}\u0000${model.id}`, {
+              provider,
+              providerName: profile.displayName ?? provider,
+              model: model.id,
+              name: model.name ?? model.id,
+              contextWindow: model.contextWindow,
+              maxTokens: model.maxTokens,
+            })
+          }
+        }
+        break
+      }
+      return out
+    }
+
+    /**
+     * Collect the models this card can offer, from both live and declared state.
+     *
+     * Live state proves a model can be routed right now; declared state covers a
+     * provider that is configured but dormant, and supplies the context window
+     * the live catalog omits.
+     *
+     * @param ctx - the client context.
+     * @returns the merged rows plus a reason when nothing could be read.
+     */
+    async function loadCatalog(ctx) {
+      const rows = new Map()
+      const reasons = []
+      for (const [key, entry] of declaredModels(ctx)) rows.set(key, { ...entry, live: false })
+
+      const remote = remoteOf(ctx)
+      if (remote === undefined) {
+        // The shared gateway face is absent; the card says so rather than
+        // claiming no provider is configured.
+        reasons.push('unavailable')
+      } else {
+        try {
+          const answer = await remote.modelCatalog()
+          if (answer !== null && typeof answer === 'object' && answer.ok === true) {
+            const catalog = answer.value ?? {}
+            for (const group of Array.isArray(catalog.groups) ? catalog.groups : []) {
+              const provider = group.id
+              if (typeof provider !== 'string') continue
+              for (const model of group.models ?? []) {
+                if (typeof model.id !== 'string') continue
+                const key = `${provider}\u0000${model.id}`
+                rows.set(key, {
+                  ...rows.get(key),
+                  provider,
+                  providerName: group.name ?? provider,
+                  model: model.id,
+                  name: model.name ?? model.id,
+                  live: true,
+                })
+              }
+            }
+            for (const failure of Array.isArray(catalog.failures) ? catalog.failures : []) {
+              reasons.push(`${failure.name ?? failure.id}: ${failure.message}`)
+            }
+          }
+        } catch (error) {
+          reasons.push(String(error?.message ?? error))
         }
       }
-      return { rows, reason: undefined }
+
+      const flat = [...rows.values()].map(row => ({ ...row, family: familyOf(row.model) }))
+      // Live models first, then families, then id, so the useful rows lead.
+      flat.sort((a, b) => (
+        Number(b.live) - Number(a.live)
+        || String(a.family ?? '~').localeCompare(String(b.family ?? '~'))
+        || a.model.localeCompare(b.model)
+      ))
+      return { rows: flat, reason: flat.length === 0 ? reasons.join('; ') || 'empty' : undefined }
     }
 
     /**
@@ -573,10 +660,13 @@ window.__ModuleLoader__.load({
                     h('td', { style: { ...styles.td, ...styles.mono } }, rule.provider),
                     h('td', { style: styles.td },
                       h('div', null, rule.model),
-                      row?.contextWindow === undefined
-                        ? null
-                        : h('div', { style: { ...styles.hint, gridColumn: 'auto' } },
-                            `${t('colWindow')} ${formatTokens(row.contextWindow)}`),
+                      h('div', { style: { ...styles.hint, gridColumn: 'auto' } },
+                        [
+                          row?.contextWindow === undefined ? null : `${t('colWindow')} ${formatTokens(row.contextWindow)}`,
+                          // A declared model whose provider is not registered right
+                          // now: the rule still applies once it is.
+                          row !== undefined && row.live === false ? t('dormant') : null,
+                        ].filter(Boolean).join(' · ')),
                     ),
                     h('td', { style: styles.td },
                       h(TokenInput, {
@@ -617,7 +707,11 @@ window.__ModuleLoader__.load({
             ? h('p', { role: 'alert', style: styles.error }, `${t('loadFailed')}: ${catalog.reason}`)
             : null,
           catalog.status === 'ready' && catalog.rows.length === 0
-            ? h('p', { style: styles.intro }, catalog.reason === 'unavailable' ? t('noCatalog') : t('noModels'))
+            ? h('p', { style: styles.intro }, catalog.reason === 'unavailable'
+                ? t('noCatalog')
+                : catalog.reason === undefined || catalog.reason === 'empty'
+                  ? t('noModels')
+                  : `${t('noModels')} (${catalog.reason})`)
             : null,
           h('div', { style: styles.actions },
             ...FAMILIES.map(family => {
