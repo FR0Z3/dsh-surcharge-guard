@@ -185,6 +185,31 @@ window.__ModuleLoader__.load({
       return EMPTY_SNAPSHOT
     }
 
+    /**
+     * Read a form snapshot and stay subscribed to it.
+     *
+     * A write changes the Host document, not this component's props, so without
+     * a subscription the card would keep rendering the values it read on mount
+     * and a saved rule would never appear. `ConfigForm` is a store with
+     * `subscribe`; a page-owned `ConfigPageForm` re-renders the entry itself,
+     * so its `state` is already fresh on every render.
+     *
+     * @param form - the resolved form handle, or `undefined`.
+     * @returns the current snapshot.
+     */
+    function useFormSnapshot(form) {
+      const subscribable = form !== undefined && typeof form.subscribe === 'function'
+        && typeof form.getSnapshot === 'function'
+      // Hooks must run unconditionally, so the fallback store is a stable no-op.
+      return React.useSyncExternalStore(
+        subscribable ? listener => form.subscribe(listener) : NO_SUBSCRIBE,
+        () => snapshotOf(form),
+      )
+    }
+
+    /** The no-op subscription used when the handle is not a store. */
+    const NO_SUBSCRIBE = () => () => {}
+
     /** Whether a value is a live (volatile) reference and not a plain value. */
     const isLive = value => value !== null && typeof value === 'object' && typeof value.get === 'function'
 
@@ -511,7 +536,7 @@ window.__ModuleLoader__.load({
      */
     function Panel({ t, ctx, form }) {
       const resolved = form ?? formFor(ctx)
-      const snapshot = snapshotOf(resolved)
+      const snapshot = useFormSnapshot(resolved)
       const [catalog, setCatalog] = React.useState({ status: 'idle', rows: [] })
       const [notice, setNotice] = React.useState(undefined)
       const [busy, setBusy] = React.useState(false)
@@ -567,11 +592,27 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /**
+       * Run a click handler's body, reporting a throw instead of losing it.
+       *
+       * A handler that throws mid-way leaves the user with a button that does
+       * nothing and no message, which is the worst failure to debug.
+       *
+       * @param body - the handler body.
+       */
+      const run = body => {
+        try {
+          body()
+        } catch (error) {
+          setNotice({ kind: 'error', text: `${t('saveFailed')}: ${String(error?.message ?? error)}` })
+        }
+      }
+
       const ruleKey = rule => `${rule.provider}\u0000${rule.model}`
       const ruleIndex = new Map(rules.map(rule => [ruleKey(rule), rule]))
 
       /** Add every catalog model of one family that has no rule yet. */
-      const addFamily = family => {
+      const addFamily = family => run(() => {
         let next = [...rules]
         for (const row of catalog.rows) {
           if (row.family !== family.id) continue
@@ -579,23 +620,23 @@ window.__ModuleLoader__.load({
           next = [...next, { provider: row.provider, model: row.model, surchargeAtTokens: family.surchargeAtTokens, enabled: true }]
         }
         if (next.length !== rules.length) void write('rules', next)
-      }
+      })
 
-      const removeRule = rule => {
+      const removeRule = rule => run(() => {
         void write('rules', rules.filter(entry => ruleKey(entry) !== ruleKey(rule)))
-      }
+      })
 
-      const setThreshold = (rule, surchargeAtTokens) => {
+      const setThreshold = (rule, surchargeAtTokens) => run(() => {
         void write('rules', rules.map(entry => (
           ruleKey(entry) === ruleKey(rule) ? { ...entry, surchargeAtTokens } : entry
         )))
-      }
+      })
 
-      const toggleRule = rule => {
+      const toggleRule = rule => run(() => {
         void write('rules', rules.map(entry => (
           ruleKey(entry) === ruleKey(rule) ? { ...entry, enabled: !entry.enabled } : entry
         )))
-      }
+      })
 
       const familyLabel = id => t(`family${id.charAt(0).toUpperCase()}${id.slice(1)}`)
 
@@ -756,7 +797,7 @@ window.__ModuleLoader__.load({
      */
     function Summary({ t, form, ctx }) {
       const resolved = form ?? formFor(ctx)
-      const snapshot = snapshotOf(resolved)
+      const snapshot = useFormSnapshot(resolved)
       if (snapshot.status === 'loading') return h('span', null, t('loading'))
       if (snapshot.status !== 'ready') return h('span', null, t('notWritable'))
       if (fieldOf(snapshot, 'enabled', true) === false) return h('span', null, t('summaryOff'))

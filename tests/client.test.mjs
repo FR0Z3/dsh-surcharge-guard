@@ -76,28 +76,44 @@ function findByProp(node, predicate, out = []) {
 }
 
 /**
- * A fake `ConfigPageForm`, the shape the page hands this card.
+ * A fake `ConfigForm`, the shape the shared service returns.
  *
- * The real contract is `{ state: ConfigFormSnapshot, mutate(ops, revision?) }`:
- * `state` is a plain snapshot the page refreshes itself, so the card never
- * subscribes. `mutate` records the path ops a save would send.
+ * It is a real store: `getSnapshot()` returns the SAME object until a write
+ * replaces it, and `subscribe` notifies. That identity rule is what makes
+ * `useSyncExternalStore` re-render exactly once per change instead of looping.
  */
 function fakeForm(initial, { writable = true, status = 'ready' } = {}) {
   const value = { ...initial }
+  const listeners = new Set()
   const writes = []
-  const form = {
+  let snapshot = { status, writable, value: { ...value }, base: undefined, user: undefined, revision: 1 }
+  const publish = () => {
+    snapshot = { ...snapshot, revision: snapshot.revision + 1, value: { ...value } }
+    for (const listener of listeners) listener()
+  }
+  return {
     value,
     writes,
-    state: { status, writable, value, base: undefined, user: undefined, revision: 1 },
+    getSnapshot: () => snapshot,
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    set(field, next) {
+      writes.push({ op: 'set', path: [field], value: next })
+      value[field] = next
+      publish()
+      return Promise.resolve(true)
+    },
     mutate(ops) {
       for (const op of ops) {
         writes.push(op)
         if (op.op === 'set') value[op.path[0]] = op.value
       }
+      publish()
       return Promise.resolve(true)
     },
   }
-  return form
 }
 
 /** A fake client context exposing only what the card reads. */
@@ -552,4 +568,95 @@ test('the live catalog and declared config merge without duplicating a model', a
     .map(node => textsOf(node).join(''))
   // Two distinct GPT ids: gpt-6.1-sol appears in both sources but counts once.
   assert.ok(labels.some(label => label.includes('(2)')), `no duplicate rows (saw: ${labels.join(' | ')})`)
+})
+
+// ---- a write must reach the screen -----------------------------------------
+
+/**
+ * The bug these cover: the card read the form snapshot but never subscribed to
+ * it. A write reached the Host, the rule was saved, and the table below stayed
+ * empty because nothing re-rendered. Saving something the user cannot see is
+ * indistinguishable from not saving at all.
+ */
+test('adding a family shows the new rules in the table immediately', async () => {
+  const { root, form } = await mount({
+    config: { ...defaultConfig, rules: [] },
+  })
+  assert.equal(textsOf(root.toJSON()).join(' ').includes('gpt-6.1-sol'), false, 'starts empty')
+
+  const button = findByProp(root.toJSON(), (props, node) => (
+    typeof props.onClick === 'function' && textsOf(node).join('').endsWith('(2)')
+  ))[0]
+  await TestRenderer.act(async () => { button.props.onClick() })
+  await settle()
+
+  assert.equal(form.writes.length, 1, 'the write was issued')
+  const text = textsOf(root.toJSON()).join(' ')
+  assert.ok(text.includes('gpt-6.1-sol'), `the first rule appeared (saw: ${text})`)
+  assert.ok(text.includes('gpt-6-astra'), 'and the second one too')
+})
+
+test('toggling a rule repaints its state', async () => {
+  const { root } = await mount()
+  const toggle = () => findByProp(root.toJSON(), (props, node) => (
+    typeof props.onClick === 'function' && textsOf(node).join('') === 'off'
+  ))[0]
+  assert.ok(toggle(), 'the per-rule off control renders')
+
+  await TestRenderer.act(async () => { toggle().props.onClick() })
+  await settle()
+
+  const text = textsOf(root.toJSON()).join(' ')
+  // The row's action now offers the opposite verb.
+  assert.ok(text.includes('on'), `the rule repainted as disabled (saw: ${text})`)
+})
+
+test('removing the only rule returns the empty state', async () => {
+  const { root } = await mount()
+  assert.ok(textsOf(root.toJSON()).join(' ').includes('gpt-6.1-sol'))
+
+  const remove = findByProp(root.toJSON(), (props, node) => (
+    typeof props.onClick === 'function' && textsOf(node).join('') === 'remove'
+  ))[0]
+  await TestRenderer.act(async () => { remove.props.onClick() })
+  await settle()
+
+  const text = textsOf(root.toJSON()).join(' ')
+  assert.equal(text.includes('gpt-6.1-sol'), false, 'the row is gone')
+  assert.ok(text.includes('rulesEmpty'), 'and the empty state is shown')
+})
+
+test('a refused write is reported instead of looking saved', async () => {
+  const form = fakeForm({ ...defaultConfig, rules: [] })
+  form.set = () => Promise.resolve(false)
+  form.mutate = () => Promise.resolve(false)
+  const { root } = await mount({ form })
+
+  const button = findByProp(root.toJSON(), (props, node) => (
+    typeof props.onClick === 'function' && textsOf(node).join('').endsWith('(2)')
+  ))[0]
+  await TestRenderer.act(async () => { button.props.onClick() })
+  await settle()
+
+  const text = textsOf(root.toJSON()).join(' ')
+  assert.ok(text.includes('saveFailed'), `the refusal is surfaced (saw: ${text})`)
+})
+
+test('repaints when the form publishes without any prop change', async () => {
+  // This is the regression that matters: a write reaches the Host, the store
+  // publishes, and only a SUBSCRIPTION can bring that change to the screen.
+  // Driving the write outside React removes every other reason to re-render.
+  const form = fakeForm({ ...defaultConfig, rules: [] })
+  const { root } = await mount({ form })
+  assert.equal(textsOf(root.toJSON()).join(' ').includes('gpt-6.1-sol'), false)
+
+  await TestRenderer.act(async () => {
+    await form.set('rules', [
+      { provider: 'codex', model: 'gpt-6.1-sol', surchargeAtTokens: 272000, enabled: true },
+    ])
+  })
+  await settle()
+
+  const text = textsOf(root.toJSON()).join(' ')
+  assert.ok(text.includes('gpt-6.1-sol'), `the published rule reached the table (saw: ${text})`)
 })
