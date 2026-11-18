@@ -1,55 +1,10 @@
-/**
- * dsh-surcharge-guard — decision logic, free of any runtime import.
- *
- * Kept separate from `index.js` for one reason: everything here is a pure
- * function of values the caller already has, so it can be unit-tested against a
- * plain fake session instead of a live Cordis context.
- *
- * The two decisions this module owns:
- *
- * 1. WHICH models are guarded. A double-billing threshold is a number the
- *    provider publishes, not a fraction of the context window, so it cannot be
- *    derived — it is recorded per model, and classified into a family only to
- *    prefill that number.
- * 2. WHERE a compaction may cut. A range that splits an assistant tool call
- *    from its result is rejected by the compaction backend, so the cut is
- *    rewinded to the nearest balanced position before any summary is attempted.
- *
- * @module dsh-surcharge-guard/logic
- */
-
-/** Bundle row id, which is also the settings namespace the Client page edits. */
-export const PLUGIN_ID = 'dsh-surcharge-guard'
-
+/** Pure configuration normalization and tool-pair-safe range selection. */
 /** Values used when the row's config omits a field. */
 export const DEFAULTS = Object.freeze({
   safetyMarginTokens: 20000,
   retainRatio: 0.16,
   maxAttempts: 2,
 })
-
-/**
- * Model families whose double-billing threshold the operator documented, with
- * the provider's published number rather than a fraction of the window.
- */
-export const FAMILIES = Object.freeze([
-  Object.freeze({ id: 'gpt', surchargeAtTokens: 272000 }),
-  Object.freeze({ id: 'gemini', surchargeAtTokens: 200000 }),
-  Object.freeze({ id: 'grok', surchargeAtTokens: 200000 }),
-])
-
-/**
- * Classify one model id into a documented family.
- * @param model - provider-owned model id.
- * @returns the family id, or `undefined` when no threshold is documented.
- */
-export function familyOf(model) {
-  const id = String(model).toLowerCase()
-  if (/(^|[-_/:])gpt/.test(id)) return 'gpt'
-  if (id.includes('gemini')) return 'gemini'
-  if (id.includes('grok')) return 'grok'
-  return undefined
-}
 
 /** Unwrap one live (volatile) config reference. */
 function liveValue(field, fallback) {
@@ -61,13 +16,13 @@ function liveValue(field, fallback) {
 /** Read a non-negative integer, falling back when the value is unusable. */
 function nonNegativeInteger(value, fallback) {
   const parsed = Math.trunc(Number(value))
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback
 }
 
-/** Read a ratio strictly inside `(0, 1)`, falling back when unusable. */
+/** Read a retention ratio within the same inclusive bounds as Config. */
 function ratioOf(value, fallback) {
   const parsed = Number(value)
-  return Number.isFinite(parsed) && parsed > 0.01 && parsed < 0.9 ? parsed : fallback
+  return Number.isFinite(parsed) && parsed >= 0.01 && parsed <= 0.9 ? parsed : fallback
 }
 
 /**
@@ -81,7 +36,7 @@ export function normalizeRule(entry) {
   const model = typeof entry.model === 'string' ? entry.model.trim() : ''
   const surchargeAtTokens = Math.trunc(Number(entry.surchargeAtTokens))
   if (provider.length === 0 || model.length === 0) return undefined
-  if (!Number.isFinite(surchargeAtTokens) || surchargeAtTokens <= 0) return undefined
+  if (!Number.isSafeInteger(surchargeAtTokens) || surchargeAtTokens <= 0) return undefined
   return { provider, model, surchargeAtTokens, enabled: entry.enabled !== false }
 }
 
@@ -94,7 +49,8 @@ export function normalizeConfig(raw) {
   const source = raw !== null && typeof raw === 'object' ? raw : {}
   const rules = []
   const seen = new Set()
-  for (const candidate of liveValue(source.rules, [])) {
+  const candidates = liveValue(source.rules, [])
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
     const rule = normalizeRule(candidate)
     if (rule === undefined) continue
     const key = `${rule.provider}\u0000${rule.model}`
@@ -142,7 +98,9 @@ export function balanceCuts(session, nodes) {
     const event = session.eventAt(node.seq)
     if (event === undefined || event.seq !== node.seq) return undefined
     if (event.type === 'assistant/message') {
-      for (const block of event.data.message.content) if (block.type === 'tool-call') open += 1
+      const content = event.data?.message?.content
+      if (!Array.isArray(content)) return undefined
+      for (const block of content) if (block?.type === 'tool-call') open += 1
     } else if (event.type === 'tool/result') {
       open -= 1
     }
@@ -164,7 +122,9 @@ export function balanceCuts(session, nodes) {
  * @returns the inclusive span, or `undefined` when nothing safe is compactable.
  */
 export function selectRange(session, nodes, retainTokens) {
-  if (nodes.length === 0) return undefined
+  const surface = session.surface.nodes
+  if (nodes.length === 0 || nodes.length !== surface.length
+    || nodes.some((node, index) => node.seq !== surface[index])) return undefined
   const cuts = balanceCuts(session, nodes)
   if (cuts === undefined) return undefined
   const head = session.eventAt(nodes[0].seq)
@@ -177,7 +137,7 @@ export function selectRange(session, nodes, retainTokens) {
     keepFrom = index
     if (accumulated >= retainTokens) break
   }
-  if (keepFrom <= firstIdx) return undefined
+  if (keepFrom <= firstIdx || cuts[firstIdx] !== true) return undefined
 
   while (keepFrom > firstIdx && cuts[keepFrom] !== true) keepFrom -= 1
   if (keepFrom <= firstIdx) return undefined
