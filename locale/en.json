@@ -51,5 +51,9 @@
   "manualLine": "Surcharge threshold (tokens)",
   "duplicateRule": "A rule already exists for this provider and model.",
   "invalidManualRule": "Enter a provider ID, a model ID, and a positive whole-token threshold.",
-  "invalidNumber": "Invalid number. Check the allowed range for this field."
+  "invalidNumber": "Invalid number. Check the allowed range for this field.",
+  "summaryModel": "Summary model",
+  "summaryDefault": "Use existing summary settings",
+  "summaryUnconfirmed": "Not in the live catalog",
+  "summaryProviderNotice": "The selected history and this summary request's prompts and tool definitions are sent to {provider}. The chat model stays the same."
 }

@@ -51,5 +51,9 @@
   "manualLine": "加价阈值（token）",
   "duplicateRule": "这个服务商和模型已有规则。",
   "invalidManualRule": "请输入服务商 ID、模型 ID 和正整数阈值。",
-  "invalidNumber": "数值无效，请检查该字段的取值范围。"
+  "invalidNumber": "数值无效，请检查该字段的取值范围。",
+  "summaryModel": "摘要模型",
+  "summaryDefault": "沿用现有摘要设置",
+  "summaryUnconfirmed": "不在实时目录中",
+  "summaryProviderNotice": "待压缩的历史和本次摘要请求的提示、工具定义会发送至 {provider}。主对话模型不变。"
 }

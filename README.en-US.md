@@ -17,14 +17,18 @@ After enabling the plugin, open **Plugins → Surcharge guard**:
 | Compact earlier | Raise the safety margin; this may spend more on summaries |
 | Keep more recent history | Raise the retain ratio within `0.01–0.9` |
 | Limit compaction attempts per turn | Set the summary attempt limit, default `2`; `0` disables guard compaction |
+| Write summaries with a cheaper model | Pick a provider and model under the rule's **Summary model**; choose **Use existing summary settings** to restore the default |
 | Pause protection without removing rules | Turn the master switch off |
 
 Thresholds and margins accept values such as `272000`, `272K`, and `1.05M`. Changes apply to subsequent steps without restarting the plugin.
+
+The summary model is used only for compaction triggered by that rule. The chat model, manual compaction, and DSH's own compaction policy keep their settings. If you choose another provider, it receives the selected history and the prompts and tool definitions in that summary request.
 
 ## Limitations
 
 - This is **best-effort protection, not a billing cap**. The guard estimates committed history and messages admitted for the step. Later prompt updates, tool definitions, attachment pricing, retries, and provider counts can differ.
 - If there is no safe range, summarization fails, or the estimate remains above the line, the original request is not blocked. The session's DSH backend runs compaction, and its summary request may incur charges. The guard's attempt limit does not cap DSH's built-in compaction or internal backend retries.
+- A custom summary model needs DSH's Basic compaction backend and enough context capacity. Switching models usually cannot reuse the chat model's prefix cache, so the summary itself may be slower or cost more. If the selected route fails, the guard logs a warning and continues the step without falling back to the original route, and that step can still cross the line.
 
 ## Development
 

@@ -272,3 +272,65 @@ test('surfaces refused and thrown writes without painting an unaccepted change',
     assert.ok(ui.button(en.disableRule))
   }
 })
+
+// ---- per-rule summary model ------------------------------------------------
+
+const summaryLabel = `${en.summaryModel} ${rule.provider}/${rule.model}`
+const select = ui => ui.root.root.findByProps({ 'aria-label': summaryLabel })
+const choose = (ui, value) => firing(() => select(ui), 'onChange', { target: { value } })
+const optionValues = ui => select(ui).findAllByType('option').map(node => node.props.value)
+
+test('offers the live catalog with the default selected, and drops the override when cleared', async t => {
+  const summaryTarget = { provider: 'p', model: 'gpt-6-luna' }
+  const ui = await mount(t, { form: formStore({ ...normal, rules: [{ ...rule, summaryTarget }] }) })
+  assert.equal(select(ui).props.value, JSON.stringify([summaryTarget.provider, summaryTarget.model]))
+  assert.deepEqual(optionValues(ui)[0], '')
+  assert.ok(optionValues(ui).includes(JSON.stringify(['p', 'gpt-6-luna'])))
+
+  await choose(ui, '')
+  // Clearing removes the field instead of writing a placeholder route.
+  assert.deepEqual(ui.form.writes, [mutation('rules', [rule])])
+  assert.equal(select(ui).props.value, '')
+})
+
+test('writes exactly the chosen route and names a cross-provider destination', async t => {
+  const ui = await mount(t)
+  const value = JSON.stringify(['p', 'gpt-6-luna'])
+  await choose(ui, value)
+  assert.deepEqual(ui.form.writes, [mutation('rules', [{
+    ...rule, summaryTarget: { provider: 'p', model: 'gpt-6-luna' },
+  }])])
+  assert.equal(select(ui).props.value, value)
+  assert.equal(ui.text().includes('Summary model'), true)
+  // Same provider: no data-destination warning.
+  assert.equal(ui.text().includes(en.summaryProviderNotice.slice(0, 20)), false)
+
+  const foreign = await mount(t)
+  await choose(foreign, JSON.stringify(['q', 'other']))
+  assert.equal(foreign.text().includes('are sent to q'), true)
+})
+
+test('keeps a saved route that left the catalog visible, flagged, and replaceable', async t => {
+  const summaryTarget = { provider: 'gone', model: 'retired' }
+  const ui = await mount(t, {
+    form: formStore({ ...normal, rules: [{ ...rule, summaryTarget }] }),
+    modelCatalog: async () => emptyGroups,
+  })
+  const saved = select(ui).props.value
+  assert.equal(saved, JSON.stringify(['gone', 'retired']), 'the saved value stays selected')
+  const orphan = select(ui).findAllByType('option').find(node => node.props.value === saved)
+  assert.match(orphan.children.join(''), /retired · gone/)
+  // Still replaceable by any live model, or clearable back to the default.
+  await choose(ui, JSON.stringify(['p', 'gpt-6-luna']))
+  assert.deepEqual(ui.form.writes[0].ops[0].value[0].summaryTarget, { provider: 'p', model: 'gpt-6-luna' })
+})
+
+test('a refused summary write keeps the previously saved route on screen', async t => {
+  const summaryTarget = { provider: 'p', model: 'gpt-6-luna' }
+  const ui = await mount(t, {
+    form: formStore({ ...normal, rules: [{ ...rule, summaryTarget }] }, { refusal: true }),
+  })
+  await choose(ui, '')
+  assert.equal(select(ui).props.value, JSON.stringify(['p', 'gpt-6-luna']))
+  assert.match(ui.text(), /Save failed/)
+})

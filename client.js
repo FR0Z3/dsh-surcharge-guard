@@ -54,7 +54,11 @@ window.__ModuleLoader__.load({
       "manualLine": "加价阈值（token）",
       "duplicateRule": "这个服务商和模型已有规则。",
       "invalidManualRule": "请输入服务商 ID、模型 ID 和正整数阈值。",
-      "invalidNumber": "数值无效，请检查该字段的取值范围。"
+      "invalidNumber": "数值无效，请检查该字段的取值范围。",
+      "summaryModel": "摘要模型",
+      "summaryDefault": "沿用现有摘要设置",
+      "summaryUnconfirmed": "不在实时目录中",
+      "summaryProviderNotice": "待压缩的历史和本次摘要请求的提示、工具定义会发送至 {provider}。主对话模型不变。"
     }
 
     const en = {
@@ -105,7 +109,11 @@ window.__ModuleLoader__.load({
       "manualLine": "Surcharge threshold (tokens)",
       "duplicateRule": "A rule already exists for this provider and model.",
       "invalidManualRule": "Enter a provider ID, a model ID, and a positive whole-token threshold.",
-      "invalidNumber": "Invalid number. Check the allowed range for this field."
+      "invalidNumber": "Invalid number. Check the allowed range for this field.",
+      "summaryModel": "Summary model",
+      "summaryDefault": "Use existing summary settings",
+      "summaryUnconfirmed": "Not in the live catalog",
+      "summaryProviderNotice": "The selected history and this summary request's prompts and tool definitions are sent to {provider}. The chat model stays the same."
     }
 
     const FAMILIES = [
@@ -319,6 +327,47 @@ window.__ModuleLoader__.load({
       })
     }
 
+    /** The catalog offers only models that can actually be routed now. */
+    function liveModels(rows) {
+      return [...rows.values()].filter(row => row.dormant !== true)
+    }
+
+    /**
+     * Pick the model that writes summaries for one rule.
+     *
+     * A saved route that has left the catalog stays visible and selectable so
+     * the setting is never silently rewritten; choosing the first option drops
+     * the override and returns to the session's own summary settings.
+     */
+    function SummaryModelSelect({ t, rule, candidates, disabled, onChange }) {
+      const id = React.useId()
+      const target = rule.summaryTarget
+      const value = target === undefined ? '' : ruleKey(target)
+      const known = target === undefined
+        || candidates.some(row => row.provider === target.provider && row.model === target.model)
+      const crossProvider = target !== undefined && target.provider !== rule.provider
+      return h('div', { style: { marginTop: '6px', maxWidth: '240px' } },
+        h('label', { htmlFor: id, style: styles.label }, t('summaryModel')),
+        h('select', {
+          id,
+          'aria-label': `${t('summaryModel')} ${rule.provider}/${rule.model}`,
+          'aria-describedby': crossProvider ? `${id}-notice` : undefined,
+          value,
+          disabled,
+          style: { ...styles.field, minWidth: 0, width: '100%', maxWidth: '100%' },
+          onChange: event => onChange(event.target.value),
+        },
+        h('option', { value: '' }, t('summaryDefault')),
+        known ? null : h('option', { value }, `${target.model} · ${target.provider} (${t('summaryUnconfirmed')})`),
+        ...candidates.map(row => h('option', {
+          key: ruleKey(row), value: ruleKey(row), title: `${row.provider}/${row.model}`,
+        }, `${row.model} · ${row.provider}`)),
+        ),
+        crossProvider ? h('p', { id: `${id}-notice`, style: styles.hint },
+          t('summaryProviderNotice').replace('{provider}', () => target.provider)) : null,
+      )
+    }
+
     function modelFamily(model) {
       if (/(^|[-_/:])gpt(?=$|[-_/:0-9])/i.test(model)) return 'gpt'
       if (/(^|[-_/:])gemini(?=$|[-_/:0-9])/i.test(model)) return 'gemini'
@@ -464,11 +513,19 @@ window.__ModuleLoader__.load({
 
       const editRule = (key, update, successStatus) => write('rules',
         rules.map(rule => ruleKey(rule) === key ? { ...rule, ...update } : rule), successStatus)
+
+      /** Replace or drop one rule's summary route without touching its guard. */
+      const setSummaryTarget = (key, next) => write('rules', rules.map(rule => {
+        if (ruleKey(rule) !== key) return rule
+        const { summaryTarget: _, ...rest } = rule
+        return next === undefined ? rest : { ...rest, summaryTarget: next }
+      }))
       const scalarRow = (label, hint, value, field, parse, format) => h(Row, { label: t(label), hint: t(hint) },
         h(NumericInput, { label: t(label), disabled, value, parse, format, invalid, onCommit: next => write(field, next) }),
       )
       const providerFailures = catalog.failures.map(failure => `${failure.name ?? failure.id}: ${failure.message}`).join('; ')
       const issue = catalog.failed || providerFailures ? [t('loadFailed'), catalog.reason ?? providerFailures].filter(Boolean).join(': ') : null
+      const summaryCandidates = liveModels(rows)
 
       return h('div', { style: styles.root },
         h('p', { style: styles.intro }, t('intro')),
@@ -500,7 +557,18 @@ window.__ModuleLoader__.load({
                 ].filter(Boolean)
                 return h('tr', { key },
                   h('td', { style: { ...styles.td, ...styles.mono } }, rule.provider),
-                  h('td', { style: styles.td }, rule.model, details.length ? h('div', { style: styles.hint }, details.join(' · ')) : null),
+                  h('td', { style: styles.td },
+                    rule.model,
+                    details.length ? h('div', { style: styles.hint }, details.join(' · ')) : null,
+                    h(SummaryModelSelect, {
+                      t, rule, candidates: summaryCandidates, disabled,
+                      onChange: selection => {
+                        // The option value is the catalog key; the config stores an object.
+                        const [provider, model] = selection === '' ? [] : JSON.parse(selection)
+                        setSummaryTarget(key, provider === undefined ? undefined : { provider, model })
+                      },
+                    }),
+                  ),
                   h('td', { style: styles.td }, h(NumericInput, {
                     label: `${t('colLine')} ${rule.provider}/${rule.model}`,
                     value: rule.surchargeAtTokens, disabled, invalid, parse: text => parseTokens(text, 1),

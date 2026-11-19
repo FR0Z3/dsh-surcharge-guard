@@ -7,6 +7,63 @@ function compactionFor(ctx, agent) {
   return ctx.get('agentPresets')?.serviceFor(agent, 'compaction') ?? ctx.get('compaction')
 }
 
+/**
+ * Compact one range through a Basic backend configured with a summary route.
+ *
+ * `compactRegion` takes only a range, an agent and a signal, and Basic keeps
+ * its summary route in instance state, so a per-rule model cannot be passed
+ * through that call. Instead this mounts a second Basic instance inside its
+ * own `compaction` realm for the duration of one transaction and disposes it
+ * afterwards: two sessions compacting at once never share or overwrite each
+ * other's route, and the session's own backend is never rebound.
+ *
+ * The class comes from the backend the preset already mounted, so no second
+ * copy of the runtime is imported. Basic configures a summary route through
+ * `summarizationProvider`/`summarizationModel`, which is also how a subclass
+ * of it can be recognised: a backend without that contract is reported rather
+ * than mounted with settings it does not understand.
+ */
+async function compactWithSummaryTarget(ctx, backend, rule, range, agent, signal) {
+  const { summaryTarget } = rule
+  const route = `${summaryTarget.provider}/${summaryTarget.model}`
+  try {
+    const config = backend.config
+    const supportsRoute = typeof config?.summarizationProvider === 'string'
+      && typeof config?.summarizationModel === 'string'
+    const Engine = backend.constructor
+    if (!supportsRoute || typeof Engine !== 'function') {
+      throw new Error('a per-rule summary model needs a Basic-style compaction backend')
+    }
+    // Keep the budget the existing policy already priced summaries with, so the
+    // replacement is not truncated at a different cap.
+    const policy = config.modelPolicies?.find(({ provider, model }) => (
+      provider === rule.provider && model === rule.model
+    ))
+    const maxTokens = policy?.maxTokens ?? config.maxTokens
+    signal.throwIfAborted()
+
+    const fiber = ctx.isolate('compaction').plugin(Engine, {
+      auto: false,
+      summarizationProvider: summaryTarget.provider,
+      summarizationModel: summaryTarget.model,
+      ...(maxTokens === undefined ? {} : { maxTokens }),
+    })
+    try {
+      const active = await fiber
+      signal.throwIfAborted()
+      const engine = active.ctx.get('compaction')
+      if (engine === undefined) throw new Error('the isolated compaction backend did not start')
+      return await engine.compactRegion(range.start, range.end, agent, signal)
+    } finally {
+      await fiber.dispose()
+    }
+  } catch (error) {
+    // Cancellation keeps its own identity; only a summary failure is renamed.
+    signal.throwIfAborted()
+    throw new Error(`summary via ${route} failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
+  }
+}
+
 /** The next request has not been built yet. Reprice the committed history for
  * the selected route, using the previous tool envelope only as a proxy. */
 function projectedHeader(session, selection) {
@@ -65,7 +122,9 @@ async function enforce(ctx, config, { agent, signal, modelSelection }, messages,
     }
     const before = projected
     budget.used += 1
-    const result = await compaction.compactRegion(range.start, range.end, agent, signal)
+    const result = rule.summaryTarget === undefined
+      ? await compaction.compactRegion(range.start, range.end, agent, signal)
+      : await compactWithSummaryTarget(ctx, compaction, rule, range, agent, signal)
     if (signal.aborted) return
     measurement = measure()
     projected = measurement.totalTokens + pendingTokens
@@ -88,6 +147,11 @@ export const Config = z.object({
     model: z.string().required(),
     surchargeAtTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).required(),
     enabled: z.boolean().default(true),
+    /** Absent means the session's own summary route. */
+    summaryTarget: z.union([z.const(null), z.object({
+      provider: z.string().required(),
+      model: z.string().required(),
+    })]).default(null),
   })).default([]).volatile(),
   safetyMarginTokens: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(DEFAULTS.safetyMarginTokens).volatile(),
   retainRatio: z.number().min(0.01).max(0.9).default(DEFAULTS.retainRatio).volatile(),

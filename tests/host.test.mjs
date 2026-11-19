@@ -13,17 +13,19 @@ const options = {
 }
 const user = tokens => ({ role: 'user', tokens })
 
-function fixture({ config = options, total = 900, previous, available = true, shrink = [400], error, root = false } = {}) {
+function fixture({ config = options, total = 900, previous, available = true, shrink = [400], error, root = false,
+  backend, isolated } = {}) {
   let hook
   let pressure = total
-  const calls = { estimates: [], measures: [], compacts: [], warnings: [], logs: [], services: [], next: 0 }
+  const calls = { estimates: [], measures: [], compacts: [], warnings: [], logs: [], services: [], next: 0,
+    isolated: [] }
   const session = {
     surface: { nodes: [0, 1, 2] },
     requestHeader: () => previous,
     eventAt: seq => ({ seq, type: seq === 0 ? 'system/message' : 'user/message' }),
   }
   const agent = { session }
-  const compaction = {
+  const compaction = backend ?? {
     compactRegion(start, end, owner, signal) {
       calls.compacts.push({ start, end, owner, signal })
       if (error) throw error
@@ -39,6 +41,24 @@ function fixture({ config = options, total = 900, previous, available = true, sh
         calls.services.push({ owner, name })
         return compaction
       } } : undefined
+    },
+    isolate(name) {
+      assert.equal(name, 'compaction')
+      const realm = Symbol(name)
+      return { plugin(Engine, settings) {
+        calls.isolated.push({ Engine, settings, realm })
+        const engine = isolated?.(settings, realm) ?? {
+          compactRegion(start, end, owner, signal) {
+            calls.compacts.push({ start, end, owner, signal, realm })
+            if (error) throw error
+            pressure = shrink[calls.compacts.length - 1] ?? pressure
+            return { shadowedSeqs: [start] }
+          },
+        }
+        const fiber = Promise.resolve({ ctx: { get: () => engine } })
+        fiber.dispose = async () => { calls.disposed = [...(calls.disposed ?? []), realm] }
+        return fiber
+      } }
     },
     on(name, handler, opts) {
       assert.equal(hook, undefined)
@@ -174,4 +194,98 @@ test('live updates take effect without reapplying the plugin', async () => {
   enabled = true
   await step()
   assert.equal(calls.compacts.length, 1)
+})
+
+// ---- per-rule summary model ------------------------------------------------
+
+const summaryTarget = { provider: 'cheap', model: 'luna' }
+
+/** A backend shaped like the shipped Basic engine, as the guard inspects it. */
+function basicBackend(calls) {
+  const engine = {
+    config: {
+      maxTokens: 8000,
+      summarizationProvider: '',
+      summarizationModel: '',
+      modelPolicies: [{ provider: 'p', model: 'guarded', maxTokens: 4000 }],
+    },
+    compactRegion(start, end, owner, signal) {
+      calls.compacts.push({ start, end, owner, signal, route: 'session' })
+      return { shadowedSeqs: [start] }
+    },
+  }
+  class BasicCompactionEngine {}
+  BasicCompactionEngine.prototype.compactRegion = engine.compactRegion
+  return { backend: Object.assign(engine, { constructor: BasicCompactionEngine }), Engine: BasicCompactionEngine }
+}
+
+test('a rule without a summary route keeps using the session backend', async () => {
+  const { step, calls } = fixture()
+  await step()
+  assert.deepEqual(calls.isolated, [])
+  assert.equal(calls.compacts.length, 1)
+})
+
+test('a routed rule compacts through its own isolated Basic backend', async () => {
+  const calls = { compacts: [] }
+  const { backend, Engine } = basicBackend(calls)
+  const probe = fixture({
+    backend,
+    config: { ...options, rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget }] },
+    isolated: () => ({
+      compactRegion(start, end, owner, signal) {
+        calls.compacts.push({ start, end, owner, signal, route: 'isolated' })
+        return { shadowedSeqs: [start] }
+      },
+    }),
+  })
+  await probe.step()
+  assert.equal(calls.compacts.length, 1)
+  assert.equal(calls.compacts[0].route, 'isolated')
+  assert.equal(probe.calls.compacts.length, 0, 'the session backend was not used')
+  assert.deepEqual(probe.calls.isolated.map(entry => entry.Engine), [Engine])
+  // The route and the inherited summary budget ride on the isolated instance.
+  assert.deepEqual(probe.calls.isolated[0].settings, {
+    auto: false, summarizationProvider: summaryTarget.provider, summarizationModel: summaryTarget.model, maxTokens: 4000,
+  })
+  assert.equal(probe.calls.disposed.length, 1, 'the temporary backend is always disposed')
+})
+
+test('repeated summaries in one step reuse no realm and never leak it', async () => {
+  const calls = { compacts: [] }
+  const { backend } = basicBackend(calls)
+  const probe = fixture({
+    backend,
+    total: 1800,
+    shrink: [1400, 1200],
+    config: { ...options, rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget }] },
+  })
+  await probe.step()
+  assert.equal(probe.calls.isolated.length, 2)
+  assert.notEqual(probe.calls.isolated[0].realm, probe.calls.isolated[1].realm)
+  assert.equal(new Set(probe.calls.disposed).size, 2, 'each transaction owned a distinct realm')
+})
+
+test('a failed routed summary warns, disposes, and does not fall back', async () => {
+  const calls = { compacts: [] }
+  const { backend } = basicBackend(calls)
+  const probe = fixture({
+    backend,
+    config: { ...options, rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget }] },
+    isolated: () => ({ compactRegion: () => { throw new Error('model unavailable') } }),
+  })
+  await probe.step()
+  assert.equal(calls.compacts.length, 0, 'no fallback to the session backend')
+  assert.equal(probe.calls.disposed.length, 1)
+  assert.match(probe.calls.warnings[0], /summary via cheap\/luna failed: model unavailable/)
+})
+
+test('a backend that is not Basic-like is reported instead of being replaced', async () => {
+  const probe = fixture({
+    backend: { config: {}, compactRegion: () => ({ shadowedSeqs: [1] }) },
+    config: { ...options, rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget }] },
+  })
+  await probe.step()
+  assert.deepEqual(probe.calls.isolated, [])
+  assert.match(probe.calls.warnings[0], /needs a Basic-style compaction backend/)
 })

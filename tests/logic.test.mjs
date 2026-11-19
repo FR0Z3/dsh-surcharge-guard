@@ -22,6 +22,19 @@ test('normalizeRule rejects unusable entries', () => {
   assert.equal(normalizeRule({ provider: 'p', model: 'm', surchargeAtTokens: 100, enabled: false }).enabled, false)
 })
 
+test('normalizeRule keeps a complete summary route and ignores a partial one', () => {
+  const rule = { provider: 'p', model: 'm', surchargeAtTokens: 100 }
+  assert.deepEqual(
+    normalizeRule({ ...rule, summaryTarget: { provider: ' q ', model: ' small ' } }).summaryTarget,
+    { provider: 'q', model: 'small' },
+  )
+  assert.equal(normalizeRule({ ...rule, summaryTarget: null }).summaryTarget, undefined)
+  // The rule still guards; only the unusable route falls back to the default.
+  assert.equal(normalizeRule({ ...rule, summaryTarget: { model: 'small' } }).model, 'm')
+  assert.equal(normalizeRule({ ...rule, summaryTarget: { model: 'small' } }).summaryTarget, undefined)
+  assert.equal(normalizeRule({ ...rule, summaryTarget: { provider: 'q' } }).summaryTarget, undefined)
+})
+
 test('normalizeConfig drops duplicates and fills defaults', () => {
   const config = normalizeConfig({
     rules: [

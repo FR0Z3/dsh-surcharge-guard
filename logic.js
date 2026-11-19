@@ -37,7 +37,16 @@ export function normalizeRule(entry) {
   const surchargeAtTokens = Math.trunc(Number(entry.surchargeAtTokens))
   if (provider.length === 0 || model.length === 0) return undefined
   if (!Number.isSafeInteger(surchargeAtTokens) || surchargeAtTokens <= 0) return undefined
-  return { provider, model, surchargeAtTokens, enabled: entry.enabled !== false }
+  // A half-written route is ignored rather than sent somewhere unintended; the
+  // rule itself still guards, because losing protection costs more than the
+  // default summary route would.
+  const summary = entry.summaryTarget
+  const summaryProvider = typeof summary?.provider === 'string' ? summary.provider.trim() : ''
+  const summaryModel = typeof summary?.model === 'string' ? summary.model.trim() : ''
+  return {
+    provider, model, surchargeAtTokens, enabled: entry.enabled !== false,
+    ...(summaryProvider && summaryModel ? { summaryTarget: { provider: summaryProvider, model: summaryModel } } : {}),
+  }
 }
 
 /**
