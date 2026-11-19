@@ -35,6 +35,22 @@ test('normalizeRule keeps a complete summary route and ignores a partial one', (
   assert.equal(normalizeRule({ ...rule, summaryTarget: { provider: 'q' } }).summaryTarget, undefined)
 })
 
+test('normalizeRule keeps a summary effort with its route and drops it with the route', () => {
+  const rule = { provider: 'p', model: 'm', surchargeAtTokens: 100 }
+  const target = { provider: 'q', model: 'small' }
+  assert.deepEqual(
+    normalizeRule({ ...rule, summaryTarget: { ...target, reasoningEffort: ' low ' } }).summaryTarget,
+    { ...target, reasoningEffort: 'low' },
+  )
+  // A blank effort means the route default, not an empty effort id.
+  assert.deepEqual(
+    normalizeRule({ ...rule, summaryTarget: { ...target, reasoningEffort: '  ' } }).summaryTarget,
+    target,
+  )
+  // The effort is route-owned: no route means no effort either.
+  assert.equal(normalizeRule({ ...rule, summaryTarget: { reasoningEffort: 'low' } }).summaryTarget, undefined)
+})
+
 test('normalizeConfig drops duplicates and fills defaults', () => {
   const config = normalizeConfig({
     rules: [

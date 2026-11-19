@@ -14,11 +14,11 @@ const options = {
 const user = tokens => ({ role: 'user', tokens })
 
 function fixture({ config = options, total = 900, previous, available = true, shrink = [400], error, root = false,
-  backend, isolated } = {}) {
+  backend, isolated, llm } = {}) {
   let hook
   let pressure = total
   const calls = { estimates: [], measures: [], compacts: [], warnings: [], logs: [], services: [], next: 0,
-    isolated: [] }
+    isolated: [], resolutions: [], provided: [], released: [] }
   const session = {
     surface: { nodes: [0, 1, 2] },
     requestHeader: () => previous,
@@ -36,6 +36,7 @@ function fixture({ config = options, total = 900, previous, available = true, sh
   const ctx = {
     get(key) {
       if (!available) return undefined
+      if (key === 'llm') return llm
       if (root) return key === 'compaction' ? compaction : undefined
       return key === 'agentPresets' ? { serviceFor(owner, name) {
         calls.services.push({ owner, name })
@@ -45,20 +46,34 @@ function fixture({ config = options, total = 900, previous, available = true, sh
     isolate(name) {
       assert.equal(name, 'compaction')
       const realm = Symbol(name)
-      return { plugin(Engine, settings) {
-        calls.isolated.push({ Engine, settings, realm })
-        const engine = isolated?.(settings, realm) ?? {
-          compactRegion(start, end, owner, signal) {
-            calls.compacts.push({ start, end, owner, signal, realm })
-            if (error) throw error
-            pressure = shrink[calls.compacts.length - 1] ?? pressure
-            return { shadowedSeqs: [start] }
-          },
-        }
-        const fiber = Promise.resolve({ ctx: { get: () => engine } })
-        fiber.dispose = async () => { calls.disposed = [...(calls.disposed ?? []), realm] }
-        return fiber
-      } }
+      // The guard isolates `llm` again inside the compaction realm when a rule
+      // names a summary effort, so a scope knows how to make an inner one.
+      const scope = (own) => ({
+        isolate(inner) {
+          assert.equal(inner, 'llm')
+          return scope(Symbol(`${String(own)}/llm`))
+        },
+        provide(name, value) {
+          assert.equal(name, 'llm')
+          calls.provided.push({ realm: own, value })
+          return () => { calls.released.push(own) }
+        },
+        plugin(Engine, settings) {
+          calls.isolated.push({ Engine, settings, realm: own })
+          const engine = isolated?.(settings, own) ?? {
+            compactRegion(start, end, owner, signal) {
+              calls.compacts.push({ start, end, owner, signal, realm: own })
+              if (error) throw error
+              pressure = shrink[calls.compacts.length - 1] ?? pressure
+              return { shadowedSeqs: [start] }
+            },
+          }
+          const fiber = Promise.resolve({ ctx: { get: () => engine } })
+          fiber.dispose = async () => { calls.disposed = [...(calls.disposed ?? []), own] }
+          return fiber
+        },
+      })
+      return scope(realm)
     },
     on(name, handler, opts) {
       assert.equal(hook, undefined)
@@ -288,4 +303,117 @@ test('a backend that is not Basic-like is reported instead of being replaced', a
   await probe.step()
   assert.deepEqual(probe.calls.isolated, [])
   assert.match(probe.calls.warnings[0], /needs a Basic-style compaction backend/)
+})
+
+// ---- per-rule summary reasoning effort --------------------------------------
+
+/** An `llm` service that records every validation and every streamed request. */
+function fakeLlm({ unsupported } = {}) {
+  const calls = { resolutions: [], streams: [] }
+  return {
+    calls,
+    resolveCallConfig(config) {
+      calls.resolutions.push(config)
+      if (unsupported !== undefined && config.reasoningEffort === unsupported) {
+        return Promise.reject(new Error(`provider "${config.provider}" model "${config.model}" does not support reasoning effort "${unsupported}"`))
+      }
+      return Promise.resolve(config)
+    },
+    stream(options) {
+      calls.streams.push(options)
+      return (async function* () {})()
+    },
+    modelCatalog() { throw new Error('the effort path must not read the catalog') },
+  }
+}
+
+const routed = (reasoningEffort) => ({ ...summaryTarget, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) })
+
+test('a routed rule without an effort leaves the summary route alone', async () => {
+  const calls = { compacts: [] }
+  const { backend } = basicBackend(calls)
+  const llm = fakeLlm()
+  const probe = fixture({
+    backend,
+    llm,
+    config: { ...options, rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget: routed() }] },
+  })
+  await probe.step()
+  assert.deepEqual(llm.calls.resolutions, [])
+  assert.deepEqual(probe.calls.provided, [], 'no llm realm is opened without an effort')
+  assert.equal(probe.calls.isolated.length, 1)
+  assert.equal(probe.calls.compacts.length, 1, 'the isolated backend still summarizes')
+  assert.equal(calls.compacts.length, 0, 'the session backend is untouched')
+})
+
+test('a routed rule with an effort validates it and binds it to this transaction only', async () => {
+  const calls = { compacts: [] }
+  const { backend, Engine } = basicBackend(calls)
+  const llm = fakeLlm()
+  const probe = fixture({
+    backend,
+    llm,
+    config: { ...options, rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget: routed('low') }] },
+  })
+  await probe.step()
+  // The effort is resolved against the exact summary route before any work.
+  assert.deepEqual(llm.calls.resolutions, [{ ...summaryTarget, reasoningEffort: 'low' }])
+  // The engine starts in the compaction realm, and its `llm` is a bound view.
+  assert.deepEqual(probe.calls.isolated.map(entry => entry.Engine), [Engine])
+  assert.equal(probe.calls.provided.length, 1)
+  const bound = probe.calls.provided[0].value
+  assert.notEqual(bound, llm, 'the shared llm service is never replaced')
+  // A service view is re-wrapped per reader unless it reports no tracker, so
+  // the bound view must hide it or the effort override would be lost.
+  assert.equal(bound[Symbol.for('cordis.tracker')], undefined)
+  // Only `stream` is overridden; every other member still reaches the service.
+  assert.throws(() => bound.modelCatalog(), /must not read the catalog/)
+  await bound.stream({ provider: summaryTarget.provider, model: summaryTarget.model }).next()
+  assert.deepEqual(llm.calls.streams, [{
+    provider: summaryTarget.provider, model: summaryTarget.model, reasoningEffort: 'low',
+  }])
+  // The isolated realm and its binding are always released.
+  assert.equal(probe.calls.disposed.length, 1)
+  assert.deepEqual(probe.calls.released, probe.calls.provided.map(entry => entry.realm))
+})
+
+test('an unsupported effort warns and skips compaction instead of falling back', async () => {
+  const calls = { compacts: [] }
+  const { backend } = basicBackend(calls)
+  const llm = fakeLlm({ unsupported: 'low' })
+  const probe = fixture({
+    backend,
+    llm,
+    config: { ...options, rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget: routed('low') }] },
+  })
+  await probe.step()
+  // No transaction was opened, so no failed marker pair was written.
+  assert.deepEqual(probe.calls.isolated, [])
+  assert.deepEqual(probe.calls.provided, [])
+  assert.equal(calls.compacts.length, 0)
+  assert.equal(probe.calls.compacts.length, 0, 'the session backend was not used either')
+  assert.match(probe.calls.warnings[0], /summary via cheap\/luna failed: .*does not support reasoning effort "low"/)
+})
+
+test('an effort without the llm service is reported rather than silently dropped', async () => {
+  const calls = { compacts: [] }
+  const { backend } = basicBackend(calls)
+  const probe = fixture({
+    backend,
+    config: { ...options, rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget: routed('low') }] },
+  })
+  await probe.step()
+  assert.deepEqual(probe.calls.isolated, [])
+  assert.equal(calls.compacts.length, 0)
+  assert.match(probe.calls.warnings[0], /needs the llm service/)
+})
+
+test('the live schema accepts an effort on the summary route and keeps it absent by default', () => {
+  // Volatile fields are live references, so the run shape comes from normalizeConfig.
+  const withEffort = normalizeConfig(Config({
+    rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget: routed('high') }],
+  }))
+  assert.equal(withEffort.rules[0].summaryTarget.reasoningEffort, 'high')
+  const without = normalizeConfig(Config({ rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget: routed() }] }))
+  assert.equal(without.rules[0].summaryTarget.reasoningEffort, undefined)
 })

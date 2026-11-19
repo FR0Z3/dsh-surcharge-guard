@@ -55,5 +55,8 @@
   "summaryModel": "Summary model",
   "summaryDefault": "Use existing summary settings",
   "summaryUnconfirmed": "Not in the live catalog",
+  "summaryEffort": "Summary reasoning effort",
+  "summaryEffortDefault": "Use the model default",
+  "summaryEffortUnknown": "The live catalog lists no reasoning effort for this model, so only its default is available.",
   "summaryProviderNotice": "The selected history and this summary request's prompts and tool definitions are sent to {provider}. The chat model stays the same."
 }

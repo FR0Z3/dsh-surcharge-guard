@@ -58,6 +58,9 @@ window.__ModuleLoader__.load({
       "summaryModel": "摘要模型",
       "summaryDefault": "沿用现有摘要设置",
       "summaryUnconfirmed": "不在实时目录中",
+      "summaryEffort": "摘要推理等级",
+      "summaryEffortDefault": "沿用模型默认",
+      "summaryEffortUnknown": "实时目录未列出该模型的推理等级，仅能沿用模型默认。",
       "summaryProviderNotice": "待压缩的历史和本次摘要请求的提示、工具定义会发送至 {provider}。主对话模型不变。"
     }
 
@@ -113,6 +116,9 @@ window.__ModuleLoader__.load({
       "summaryModel": "Summary model",
       "summaryDefault": "Use existing summary settings",
       "summaryUnconfirmed": "Not in the live catalog",
+      "summaryEffort": "Summary reasoning effort",
+      "summaryEffortDefault": "Use the model default",
+      "summaryEffortUnknown": "The live catalog lists no reasoning effort for this model, so only its default is available.",
       "summaryProviderNotice": "The selected history and this summary request's prompts and tool definitions are sent to {provider}. The chat model stays the same."
     }
 
@@ -332,6 +338,47 @@ window.__ModuleLoader__.load({
       return [...rows.values()].filter(row => row.dormant !== true)
     }
 
+    /** The efforts the live catalog advertises for one exact route. */
+    function effortsFor(rows, target) {
+      const efforts = rows.get(ruleKey(target))?.efforts
+      return Array.isArray(efforts) ? efforts : []
+    }
+
+    /**
+     * Pick the reasoning effort for the model that writes summaries.
+     *
+     * The choice belongs to a chosen summary route, so it is offered only
+     * while one is set: the session's own summary settings keep their effort.
+     * A saved effort the catalog no longer advertises stays visible and
+     * selectable rather than being silently rewritten.
+     */
+    function SummaryEffortSelect({ t, rule, rows, disabled, onChange }) {
+      const id = React.useId()
+      const target = rule.summaryTarget
+      if (target === undefined) return null
+      const efforts = effortsFor(rows, target)
+      const value = target.reasoningEffort ?? ''
+      const known = value === '' || efforts.some(effort => effort.id === value)
+      return h('div', { style: { marginTop: '6px', maxWidth: '240px' } },
+        h('label', { htmlFor: id, style: styles.label }, t('summaryEffort')),
+        h('select', {
+          id,
+          'aria-label': `${t('summaryEffort')} ${target.provider}/${target.model}`,
+          value,
+          disabled,
+          style: { ...styles.field, minWidth: 0, width: '100%', maxWidth: '100%' },
+          onChange: event => onChange(event.target.value),
+        },
+        h('option', { value: '' }, t('summaryEffortDefault')),
+        known ? null : h('option', { value }, `${value} (${t('summaryUnconfirmed')})`),
+        ...efforts.map(effort => h('option', {
+          key: effort.id, value: effort.id, title: effort.description,
+        }, effort.name)),
+        ),
+        efforts.length === 0 ? h('p', { style: styles.hint }, t('summaryEffortUnknown')) : null,
+      )
+    }
+
     /**
      * Pick the model that writes summaries for one rule.
      *
@@ -412,10 +459,13 @@ window.__ModuleLoader__.load({
       }
       for (const { id: provider, models } of live.groups) {
         if (typeof provider !== 'string') continue
-        for (const { id: model } of models ?? []) {
+        for (const { id: model, reasoning } of models ?? []) {
           if (typeof model !== 'string') continue
           const key = ruleKey({ provider, model })
-          rows.set(key, { ...rows.get(key), provider, model, dormant: false })
+          // Only the live catalog reports efforts; a configured model keeps
+          // whatever the host generation advertised, or none.
+          const efforts = Array.isArray(reasoning?.efforts) ? reasoning.efforts : undefined
+          rows.set(key, { ...rows.get(key), provider, model, dormant: false, ...(efforts === undefined ? {} : { efforts }) })
         }
       }
       return rows
@@ -518,7 +568,19 @@ window.__ModuleLoader__.load({
       const setSummaryTarget = (key, next) => write('rules', rules.map(rule => {
         if (ruleKey(rule) !== key) return rule
         const { summaryTarget: _, ...rest } = rule
-        return next === undefined ? rest : { ...rest, summaryTarget: next }
+        if (next === undefined) return rest
+        // Efforts are route-owned, so a different route starts from its own
+        // default rather than inheriting one the previous model happened to offer.
+        const kept = rule.summaryTarget?.provider === next.provider && rule.summaryTarget?.model === next.model
+          ? rule.summaryTarget.reasoningEffort
+          : undefined
+        return { ...rest, summaryTarget: kept === undefined ? next : { ...next, reasoningEffort: kept } }
+      }))
+      /** Set or clear one rule's summary effort without touching its route. */
+      const setSummaryEffort = (key, reasoningEffort) => write('rules', rules.map(rule => {
+        if (ruleKey(rule) !== key || rule.summaryTarget === undefined) return rule
+        const { reasoningEffort: _, ...target } = rule.summaryTarget
+        return { ...rule, summaryTarget: reasoningEffort === '' ? target : { ...target, reasoningEffort } }
       }))
       const scalarRow = (label, hint, value, field, parse, format) => h(Row, { label: t(label), hint: t(hint) },
         h(NumericInput, { label: t(label), disabled, value, parse, format, invalid, onCommit: next => write(field, next) }),
@@ -567,6 +629,10 @@ window.__ModuleLoader__.load({
                         const [provider, model] = selection === '' ? [] : JSON.parse(selection)
                         setSummaryTarget(key, provider === undefined ? undefined : { provider, model })
                       },
+                    }),
+                    h(SummaryEffortSelect, {
+                      t, rule, rows, disabled,
+                      onChange: reasoningEffort => setSummaryEffort(key, reasoningEffort),
                     }),
                   ),
                   h('td', { style: styles.td }, h(NumericInput, {

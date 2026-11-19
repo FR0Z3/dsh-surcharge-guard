@@ -14,11 +14,15 @@ const useInstalled = Boolean(install) && (process.versions.electron !== undefine
  * instance the guard mounts is exercised for real: it must start inside its
  * own realm, receive the configured route, and record it in `compaction/summary`.
  * Nothing here contacts a provider.
+ *
+ * With `stubSummarizer` the subclass is dropped entirely, so the shipped
+ * `summarize()` runs and the recorded `llm.stream` options are the real
+ * auxiliary request the guard produced.
  */
-async function run({ maxAttempts = 1 } = {}) {
+async function run({ maxAttempts = 1, stubSummarizer = true } = {}) {
   const require = createRequire(`${install}/package.json`)
   const load = name => import(pathToFileURL(require.resolve(`@deepseek-ai/${name}`)))
-  const { Context } = await load('cordis')
+  const { Context, Service } = await load('cordis')
   const { Session, SessionId } = await load('dsh-session')
   const { agentEvents } = await load('dsh-agent')
   const { createUserMessage } = await load('dsh-llm')
@@ -31,6 +35,8 @@ async function run({ maxAttempts = 1 } = {}) {
   const agent = { id: session.id, ctx, session, options: route }
   const signal = new AbortController().signal
   const summaries = []
+  const streams = []
+  const resolutions = []
   class OfflineCompaction extends BasicCompactionEngine {
     /** Record the route this instance was configured with, not the session's. */
     async summarize() {
@@ -41,13 +47,35 @@ async function run({ maxAttempts = 1 } = {}) {
       return { ...target, summary: [{ type: 'text', text: 'short checkpoint' }] }
     }
   }
-  ctx.provide('llm', {
-    imageRequestPricing() {},
-    stream() { throw Error('This test must never call a model') },
-  })
+  /** A model-free stream that still satisfies the shipped summarizer. */
+  async function* reply(options) {
+    streams.push(options)
+    yield { type: 'text-delta', index: 0, text: 'offline checkpoint text' }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+  /**
+   * A real service, not a plain object: the framework wraps every service read
+   * in a traceable proxy, which is exactly the wrapping an effort override has
+   * to survive to reach the summarizer.
+   */
+  class OfflineLlm extends Service {
+    constructor(owner) { super(owner, 'llm') }
+    imageRequestPricing() {}
+    async resolveCallConfig(config) {
+      resolutions.push(config)
+      if (config.reasoningEffort === 'unsupported') {
+        throw new Error(`provider "${config.provider}" model "${config.model}" does not support reasoning effort "unsupported"`)
+      }
+      return config
+    }
+    stream(options) { return reply(options) }
+  }
+  const llm = new OfflineLlm(ctx)
+  assert.equal(typeof llm.stream, 'function', 'the effort override rides on a real service')
   ctx.provide('sessions', {})
   const meter = new TokenMeter(ctx)
-  const engine = new OfflineCompaction(ctx.isolate('compaction'), { auto: false })
+  const Engine = stubSummarizer ? OfflineCompaction : BasicCompactionEngine
+  const engine = new Engine(ctx.isolate('compaction'), { auto: false })
   assert.equal(ctx.get('compaction'), undefined)
   ctx.provide('agentPresets', { serviceFor: (owner, key) => owner === agent && key === 'compaction' ? engine : undefined })
   const user = text => createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text }] })
@@ -55,7 +83,7 @@ async function run({ maxAttempts = 1 } = {}) {
   // Visible history, deliberately without a first `request/header`.
   session.append('user/message', user('history content '.repeat(2500)), { surfaceOp: 'append' })
   session.append('user/message', user('keep recent '.repeat(100)), { surfaceOp: 'append' })
-  return { ctx, session, route, agent, signal, summaries, meter, user, engine, agentEvents }
+  return { ctx, session, route, agent, signal, summaries, streams, resolutions, meter, user, engine, agentEvents }
 }
 
 test('installed DSH: real waterfall, token meter and summary transaction', { skip: !useInstalled }, async () => {
@@ -105,6 +133,63 @@ test('installed DSH: a per-rule route starts a separate backend and is recorded'
     // The session still measures against its own route, and its backend is intact.
     assert.ok(meter.measure(session, { config: route }).totalTokens < 900)
     assert.equal(ctx.get('compaction'), undefined, 'no root service was left behind')
+  } finally {
+    await fiber.dispose()
+  }
+})
+
+test('installed DSH: a per-rule effort reaches the real auxiliary request only', { skip: !useInstalled }, async () => {
+  const { ctx, session, route, agent, signal, streams, resolutions, meter, user, agentEvents } = await run({ stubSummarizer: false })
+  const target = { provider: 'offline-summary', model: 'cheap', reasoningEffort: 'low' }
+  const fiber = ctx.plugin({ apply: guard.apply, Config: guard.Config, inject: guard.inject }, {
+    rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget: target }], safetyMarginTokens: 100, maxAttempts: 1,
+  })
+  try {
+    await new Promise(resolve => setImmediate(resolve))
+    const admitted = [user('new step input')]
+    await agentEvents(ctx, agent).waterfall('agent/pre-step', {
+      turn: 1, step: 1, signal, modelSelection: route, messages: admitted,
+    }, async () => ({ kind: 'enter', messages: admitted }))
+    // The effort was validated against the summary route before any work.
+    assert.deepEqual(resolutions, [{ provider: target.provider, model: target.model, reasoningEffort: 'low' }])
+    // The shipped summarizer really dispatched one call, carrying the effort —
+    // through the framework's own service proxy, not the raw instance.
+    assert.equal(streams.length, 1)
+    assert.deepEqual([streams[0].provider, streams[0].model, streams[0].reasoningEffort],
+      [target.provider, target.model, 'low'])
+    assert.equal(streams[0].purpose, 'compaction')
+    const summaryEvent = session.snapshotEvents().find(event => event.type === 'compaction/summary')
+    assert.deepEqual([summaryEvent.data.provider, summaryEvent.data.model], [target.provider, target.model])
+    // The realm was released: a call through the shared service now records
+    // no effort at all, and nothing outside the transaction saw an override.
+    await ctx.get('llm').stream({ provider: target.provider, model: target.model }).next()
+    assert.equal(streams.length, 2)
+    assert.equal(streams[1].reasoningEffort, undefined, 'the shared llm service was never replaced')
+    assert.ok(meter.measure(session, { config: route }).totalTokens < 900)
+    assert.equal(ctx.get('compaction'), undefined, 'no root service was left behind')
+  } finally {
+    await fiber.dispose()
+  }
+})
+
+test('installed DSH: an unsupported effort skips the transaction and leaves no marker', { skip: !useInstalled }, async () => {
+  const { ctx, session, route, agent, signal, streams, meter, user, agentEvents } = await run({ stubSummarizer: false })
+  const target = { provider: 'offline-summary', model: 'cheap', reasoningEffort: 'unsupported' }
+  const fiber = ctx.plugin({ apply: guard.apply, Config: guard.Config, inject: guard.inject }, {
+    rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget: target }], safetyMarginTokens: 100, maxAttempts: 1,
+  })
+  try {
+    await new Promise(resolve => setImmediate(resolve))
+    const admitted = [user('new step input')]
+    const before = meter.measure(session, { config: route }).totalTokens
+    const decision = await agentEvents(ctx, agent).waterfall('agent/pre-step', {
+      turn: 1, step: 1, signal, modelSelection: route, messages: admitted,
+    }, async () => ({ kind: 'enter', messages: admitted }))
+    // The step is admitted unchanged, with no summary call and no marker pair.
+    assert.deepEqual(decision, { kind: 'enter', messages: admitted })
+    assert.equal(streams.length, 0)
+    assert.equal(meter.measure(session, { config: route }).totalTokens, before)
+    assert.equal(session.snapshotEvents().some(event => event.type === 'compaction/start'), false)
   } finally {
     await fiber.dispose()
   }

@@ -43,9 +43,18 @@ export function normalizeRule(entry) {
   const summary = entry.summaryTarget
   const summaryProvider = typeof summary?.provider === 'string' ? summary.provider.trim() : ''
   const summaryModel = typeof summary?.model === 'string' ? summary.model.trim() : ''
+  // The effort belongs to the chosen summary route, so it is dropped with it:
+  // the session's own summary settings keep their own effort.
+  const summaryEffort = typeof summary?.reasoningEffort === 'string' ? summary.reasoningEffort.trim() : ''
   return {
     provider, model, surchargeAtTokens, enabled: entry.enabled !== false,
-    ...(summaryProvider && summaryModel ? { summaryTarget: { provider: summaryProvider, model: summaryModel } } : {}),
+    ...(summaryProvider && summaryModel ? {
+      summaryTarget: {
+        provider: summaryProvider,
+        model: summaryModel,
+        ...(summaryEffort ? { reasoningEffort: summaryEffort } : {}),
+      },
+    } : {}),
   }
 }
 
