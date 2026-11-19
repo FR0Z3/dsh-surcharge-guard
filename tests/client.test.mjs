@@ -391,6 +391,15 @@ test('switching the summary model drops an effort that belonged to the old route
   assert.deepEqual(same.form.writes[0].ops[0].value[0].summaryTarget, summaryTarget)
 })
 
+test('re-picking a route whose stored effort is blank writes no empty effort', async t => {
+  // "Default" has one spelling in the document: an absent field. A stored
+  // empty string must not be perpetuated just because the route was re-picked.
+  const summaryTarget = { provider: 'p', model: 'gpt-6-luna', reasoningEffort: '' }
+  const ui = await mount(t, { form: formStore({ ...normal, rules: [{ ...rule, summaryTarget }] }) })
+  await choose(ui, JSON.stringify(['p', 'gpt-6-luna']))
+  assert.deepEqual(ui.form.writes[0].ops[0].value[0].summaryTarget, { provider: 'p', model: 'gpt-6-luna' })
+})
+
 test('keeps a saved effort the catalog no longer offers visible and flagged', async t => {
   const summaryTarget = { provider: 'p', model: 'gpt-6-luna', reasoningEffort: 'ultra' }
   const ui = await mount(t, { form: formStore({ ...normal, rules: [{ ...rule, summaryTarget }] }) })
@@ -405,4 +414,48 @@ test('explains a route whose live catalog advertises no reasoning effort', async
   const ui = await mount(t, { form: formStore({ ...normal, rules: [{ ...rule, summaryTarget }] }) })
   assert.deepEqual(effortSelect(ui, 'p', rule.model).findAllByType('option').map(node => node.props.value), [''])
   assert.ok(ui.text().includes(en.summaryEffortUnknown))
+})
+
+test('does not claim a route has no levels when the catalog never described it', async t => {
+  const summaryTarget = { provider: 'gone', model: 'retired' }
+  const effortOptions = ui => effortSelect(ui, 'gone', 'retired').findAllByType('option').map(node => node.props.value)
+
+  // The route is absent from the catalog entirely: the summary-model select
+  // already flags that, so the effort hint must stay silent rather than
+  // assert a capability nothing observed.
+  const absent = await mount(t, { form: formStore({ ...normal, rules: [{ ...rule, summaryTarget }] }) })
+  assert.deepEqual(effortOptions(absent), [''])
+  assert.equal(absent.text().includes(en.summaryEffortUnknown), false)
+
+  // Nor when the catalog itself could not be read.
+  const offline = await mount(t, {
+    form: formStore({ ...normal, rules: [{ ...rule, summaryTarget }] }),
+    modelCatalog: async () => ({ ok: false, error: { message: 'offline' } }),
+  })
+  assert.equal(offline.text().includes(en.summaryEffortUnknown), false)
+
+  // A model declared in the provider settings but never described by a live
+  // catalog is the same unknown: the row exists, the capability does not.
+  const declared = formStore({ providers: { gone: { models: [{ id: 'retired' }] } } })
+  const undeclaredLive = await mount(t, {
+    form: formStore({ ...normal, rules: [{ ...rule, summaryTarget }] }),
+    declared,
+    modelCatalog: async () => ({ ok: false, error: { message: 'offline' } }),
+  })
+  assert.equal(undeclaredLive.text().includes(en.summaryEffortUnknown), false)
+
+  // The catalog answering with a provider failure is also not an answer.
+  const failedProvider = await mount(t, {
+    form: formStore({ ...normal, rules: [{ ...rule, summaryTarget }] }),
+    declared,
+    modelCatalog: async () => ({ ok: true, value: { groups: [], failures: [{ id: 'gone', message: 'unreachable' }] } }),
+  })
+  assert.equal(failedProvider.text().includes(en.summaryEffortUnknown), false)
+})
+
+test('survives a stored null summary target instead of crashing the panel', async t => {
+  // The Config schema permits `summaryTarget: null`, so the panel must render.
+  const ui = await mount(t, { form: formStore({ ...normal, rules: [{ ...rule, summaryTarget: null }] }) })
+  assert.equal(select(ui).props.value, '')
+  assert.equal(ui.root.root.findAllByProps({ 'aria-label': effortLabel() }).length, 0)
 })

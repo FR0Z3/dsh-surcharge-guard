@@ -173,7 +173,7 @@ test('installed DSH: a per-rule effort reaches the real auxiliary request only',
 })
 
 test('installed DSH: an unsupported effort skips the transaction and leaves no marker', { skip: !useInstalled }, async () => {
-  const { ctx, session, route, agent, signal, streams, meter, user, agentEvents } = await run({ stubSummarizer: false })
+  const { ctx, session, route, agent, signal, streams, resolutions, meter, user, agentEvents } = await run({ stubSummarizer: false })
   const target = { provider: 'offline-summary', model: 'cheap', reasoningEffort: 'unsupported' }
   const fiber = ctx.plugin({ apply: guard.apply, Config: guard.Config, inject: guard.inject }, {
     rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget: target }], safetyMarginTokens: 100, maxAttempts: 1,
@@ -182,13 +182,25 @@ test('installed DSH: an unsupported effort skips the transaction and leaves no m
     await new Promise(resolve => setImmediate(resolve))
     const admitted = [user('new step input')]
     const before = meter.measure(session, { config: route }).totalTokens
-    const decision = await agentEvents(ctx, agent).waterfall('agent/pre-step', {
+    const step = () => agentEvents(ctx, agent).waterfall('agent/pre-step', {
       turn: 1, step: 1, signal, modelSelection: route, messages: admitted,
     }, async () => ({ kind: 'enter', messages: admitted }))
+    const decision = await step()
     // The step is admitted unchanged, with no summary call and no marker pair.
     assert.deepEqual(decision, { kind: 'enter', messages: admitted })
     assert.equal(streams.length, 0)
     assert.equal(meter.measure(session, { config: route }).totalTokens, before)
+    assert.equal(session.snapshotEvents().some(event => event.type === 'compaction/start'), false)
+    // The rejected level never reached a transaction, and the turn's only
+    // attempt was not spent on it: a later step still tries again rather than
+    // reporting an exhausted budget.
+    assert.deepEqual(resolutions, [{ provider: target.provider, model: target.model, reasoningEffort: 'unsupported' }])
+    await step()
+    assert.deepEqual(resolutions, [
+      { provider: target.provider, model: target.model, reasoningEffort: 'unsupported' },
+      { provider: target.provider, model: target.model, reasoningEffort: 'unsupported' },
+    ])
+    assert.equal(streams.length, 0)
     assert.equal(session.snapshotEvents().some(event => event.type === 'compaction/start'), false)
   } finally {
     await fiber.dispose()

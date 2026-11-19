@@ -51,6 +51,21 @@ test('normalizeRule keeps a summary effort with its route and drops it with the 
   assert.equal(normalizeRule({ ...rule, summaryTarget: { reasoningEffort: 'low' } }).summaryTarget, undefined)
 })
 
+test('normalizeRule repairs or drops an effort an editor could have mangled', () => {
+  const rule = { provider: 'p', model: 'm', surchargeAtTokens: 100 }
+  const target = { provider: 'q', model: 'small' }
+  const effortOf = reasoningEffort => normalizeRule({ ...rule, summaryTarget: { ...target, reasoningEffort } }).summaryTarget
+  // Zero-width characters are not `WhiteSpace`, so a plain trim would keep them
+  // and produce an id no catalog can match; they are stripped instead.
+  assert.deepEqual(effortOf('\u200blow'), { ...target, reasoningEffort: 'low' })
+  assert.deepEqual(effortOf('\ufefflow\u200d'), { ...target, reasoningEffort: 'low' })
+  // An effort made only of invisible characters is the default, not an id.
+  assert.deepEqual(effortOf('\u200b\u200b'), target)
+  // An over-long value is dropped rather than truncated into a different id.
+  assert.deepEqual(effortOf('x'.repeat(65)), target)
+  assert.deepEqual(effortOf('x'.repeat(64)), { ...target, reasoningEffort: 'x'.repeat(64) })
+})
+
 test('normalizeConfig drops duplicates and fills defaults', () => {
   const config = normalizeConfig({
     rules: [

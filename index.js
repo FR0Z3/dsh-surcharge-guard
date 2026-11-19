@@ -32,6 +32,37 @@ function withSummaryEffort(llm, reasoningEffort) {
 }
 
 /**
+ * Reject a summary effort the chosen route cannot serve, before any work.
+ *
+ * Runs outside the compaction transaction so a mis-set level costs one warning
+ * and nothing else: no marker pair, no attempt spent, no summary request. The
+ * effort the caller passes on is what the route is asked for, so a route
+ * default never silently replaces it.
+ *
+ * @returns the bound `llm` view to provide, or `undefined` when no effort is set.
+ */
+async function resolveSummaryEffort(ctx, rule, signal) {
+  const { summaryTarget } = rule
+  const effort = summaryTarget?.reasoningEffort
+  if (effort === undefined) return undefined
+  const llm = ctx.get('llm')
+  if (llm === undefined) throw new Error(`a summary effort needs the llm service to route "${effort}"`)
+  try {
+    await llm.resolveCallConfig({
+      provider: summaryTarget.provider,
+      model: summaryTarget.model,
+      reasoningEffort: effort,
+    }, signal)
+  } catch (error) {
+    signal.throwIfAborted()
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new Error(`the summary route cannot use reasoning effort "${effort}": ${reason}`, { cause: error })
+  }
+  signal.throwIfAborted()
+  return withSummaryEffort(llm, effort)
+}
+
+/**
  * Compact one range through a Basic backend configured with a summary route.
  *
  * `compactRegion` takes only a range, an agent and a signal, and Basic keeps
@@ -51,10 +82,9 @@ function withSummaryEffort(llm, reasoningEffort) {
  * of it can be recognised: a backend without that contract is reported rather
  * than mounted with settings it does not understand.
  */
-async function compactWithSummaryTarget(ctx, backend, rule, range, agent, signal) {
+async function compactWithSummaryTarget(ctx, backend, rule, range, agent, signal, bound) {
   const { summaryTarget } = rule
   const route = `${summaryTarget.provider}/${summaryTarget.model}`
-  const effort = summaryTarget.reasoningEffort
   try {
     const config = backend.config
     const supportsRoute = typeof config?.summarizationProvider === 'string'
@@ -71,27 +101,13 @@ async function compactWithSummaryTarget(ctx, backend, rule, range, agent, signal
     const maxTokens = policy?.maxTokens ?? config.maxTokens
     signal.throwIfAborted()
 
-    // Resolve the route and its effort before opening a transaction, so an
-    // effort the route cannot serve is one warning rather than a half-run
-    // compaction that still writes a failed marker pair.
-    const llm = effort === undefined ? undefined : ctx.get('llm')
-    if (effort !== undefined) {
-      if (llm === undefined) throw new Error(`a summary effort needs the llm service to route "${effort}"`)
-      await llm.resolveCallConfig({
-        provider: summaryTarget.provider,
-        model: summaryTarget.model,
-        reasoningEffort: effort,
-      }, signal)
-      signal.throwIfAborted()
-    }
-
-    const realm = effort === undefined ? ctx.isolate('compaction') : ctx.isolate('compaction').isolate('llm')
+    const realm = bound === undefined ? ctx.isolate('compaction') : ctx.isolate('compaction').isolate('llm')
     let release
     try {
       // Registered before the backend so its first dependency check already
       // sees the bound view; the realm is fresh per transaction, so no other
       // summary call can resolve it.
-      release = effort === undefined ? undefined : realm.provide('llm', withSummaryEffort(llm, effort))
+      release = bound === undefined ? undefined : realm.provide('llm', bound)
       const fiber = realm.plugin(Engine, {
         auto: false,
         summarizationProvider: summaryTarget.provider,
@@ -166,6 +182,19 @@ async function enforce(ctx, config, { agent, signal, modelSelection }, messages,
     warn('no compaction service')
     return
   }
+  // A summary effort the route cannot serve is settled before the first
+  // attempt is spent: a mis-set level must not disable the rule's protection
+  // for the rest of the turn. It is reported once per step and the guard
+  // stops trying, because no later attempt could succeed either.
+  let bound
+  try {
+    bound = await resolveSummaryEffort(ctx, rule, signal)
+  } catch (error) {
+    if (signal.aborted) return
+    warn(error instanceof Error ? error.message : String(error))
+    return
+  }
+  if (signal.aborted) return
 
   while (projected >= cap && budget.used < config.maxAttempts && !signal.aborted) {
     const range = selectRange(session, measurement.nodes, Math.floor(cap * config.retainRatio))
@@ -177,7 +206,7 @@ async function enforce(ctx, config, { agent, signal, modelSelection }, messages,
     budget.used += 1
     const result = rule.summaryTarget === undefined
       ? await compaction.compactRegion(range.start, range.end, agent, signal)
-      : await compactWithSummaryTarget(ctx, compaction, rule, range, agent, signal)
+      : await compactWithSummaryTarget(ctx, compaction, rule, range, agent, signal, bound)
     if (signal.aborted) return
     measurement = measure()
     projected = measurement.totalTokens + pendingTokens

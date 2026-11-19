@@ -57,6 +57,6 @@
   "summaryUnconfirmed": "不在实时目录中",
   "summaryEffort": "摘要推理等级",
   "summaryEffortDefault": "沿用模型默认",
-  "summaryEffortUnknown": "实时目录未列出该模型的推理等级，仅能沿用模型默认。",
+  "summaryEffortUnknown": "实时目录未列出这个摘要模型的推理等级，只能沿用模型默认。",
   "summaryProviderNotice": "待压缩的历史和本次摘要请求的提示、工具定义会发送至 {provider}。主对话模型不变。"
 }

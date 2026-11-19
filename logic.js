@@ -44,8 +44,13 @@ export function normalizeRule(entry) {
   const summaryProvider = typeof summary?.provider === 'string' ? summary.provider.trim() : ''
   const summaryModel = typeof summary?.model === 'string' ? summary.model.trim() : ''
   // The effort belongs to the chosen summary route, so it is dropped with it:
-  // the session's own summary settings keep their own effort.
-  const summaryEffort = typeof summary?.reasoningEffort === 'string' ? summary.reasoningEffort.trim() : ''
+  // the session's own summary settings keep their own effort. Zero-width
+  // characters are not `WhiteSpace`, so they are stripped explicitly — an
+  // invisible id could never match a catalog entry and would fail every step.
+  const rawEffort = typeof summary?.reasoningEffort === 'string'
+    ? summary.reasoningEffort.replace(/[\u200b-\u200d\ufeff]/g, '').trim()
+    : ''
+  const summaryEffort = rawEffort.length > 0 && rawEffort.length <= 64 ? rawEffort : ''
   return {
     provider, model, surchargeAtTokens, enabled: entry.enabled !== false,
     ...(summaryProvider && summaryModel ? {

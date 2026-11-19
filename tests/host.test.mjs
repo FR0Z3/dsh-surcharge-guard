@@ -18,7 +18,7 @@ function fixture({ config = options, total = 900, previous, available = true, sh
   let hook
   let pressure = total
   const calls = { estimates: [], measures: [], compacts: [], warnings: [], logs: [], services: [], next: 0,
-    isolated: [], resolutions: [], provided: [], released: [] }
+    isolated: [], provided: [], released: [] }
   const session = {
     surface: { nodes: [0, 1, 2] },
     requestHeader: () => previous,
@@ -36,7 +36,7 @@ function fixture({ config = options, total = 900, previous, available = true, sh
   const ctx = {
     get(key) {
       if (!available) return undefined
-      if (key === 'llm') return llm
+      if (key === 'llm') return llm === undefined ? undefined : traced(llm)
       if (root) return key === 'compaction' ? compaction : undefined
       return key === 'agentPresets' ? { serviceFor(owner, name) {
         calls.services.push({ owner, name })
@@ -48,19 +48,32 @@ function fixture({ config = options, total = 900, previous, available = true, sh
       const realm = Symbol(name)
       // The guard isolates `llm` again inside the compaction realm when a rule
       // names a summary effort, so a scope knows how to make an inner one.
-      const scope = (own) => ({
+      // A provisioned value is what the backend actually resolves, exactly as
+      // the real reflect store would hand it back.
+      const scope = (own, provided) => ({
         isolate(inner) {
           assert.equal(inner, 'llm')
-          return scope(Symbol(`${String(own)}/llm`))
+          return scope(Symbol(`${String(own)}/llm`), provided)
         },
         provide(name, value) {
           assert.equal(name, 'llm')
           calls.provided.push({ realm: own, value })
+          // Provision before the backend, as the guard does; a later provide
+          // must not be visible to a fiber that already started.
+          if (provided.started) calls.lateProvides = [...(calls.lateProvides ?? []), own]
+          provided.value = value
           return () => { calls.released.push(own) }
         },
         plugin(Engine, settings) {
           calls.isolated.push({ Engine, settings, realm: own })
-          const engine = isolated?.(settings, own) ?? {
+          provided.started = true
+          // What the backend fiber resolves through `ctx.get`: its own engine,
+          // and whatever this realm provisioned for `llm`.
+          const resolve = name => {
+            if (name === 'llm') return provided.value === undefined ? undefined : traced(provided.value)
+            return undefined
+          }
+          const engine = isolated?.(settings, own, resolve) ?? {
             compactRegion(start, end, owner, signal) {
               calls.compacts.push({ start, end, owner, signal, realm: own })
               if (error) throw error
@@ -68,12 +81,12 @@ function fixture({ config = options, total = 900, previous, available = true, sh
               return { shadowedSeqs: [start] }
             },
           }
-          const fiber = Promise.resolve({ ctx: { get: () => engine } })
+          const fiber = Promise.resolve({ ctx: { get: name => name === 'compaction' ? engine : resolve(name) } })
           fiber.dispose = async () => { calls.disposed = [...(calls.disposed ?? []), own] }
           return fiber
         },
       })
-      return scope(realm)
+      return scope(realm, { value: undefined, started: false })
     },
     on(name, handler, opts) {
       assert.equal(hook, undefined)
@@ -307,10 +320,40 @@ test('a backend that is not Basic-like is reported instead of being replaced', a
 
 // ---- per-rule summary reasoning effort --------------------------------------
 
+const TRACKER = Symbol.for('cordis.tracker')
+
+/**
+ * Mimic the framework's service hand-out.
+ *
+ * Real Cordis wraps every service read in a traceable proxy, and that proxy's
+ * `get` trap resolves functions from the *prototype descriptor*, so an override
+ * living only on the value's own `get` trap would be bypassed. A service with no
+ * tracker symbol is handed out untouched. Modelling this is what makes the
+ * tracker-hiding in `withSummaryEffort` testable outside a real DSH install.
+ */
+function traced(value) {
+  if (value === null || typeof value !== 'object') return value
+  if (value[TRACKER] === undefined) return value
+  return new Proxy(value, {
+    get(target, property, receiver) {
+      if (property === TRACKER) return target[TRACKER]
+      const descriptor = (() => {
+        for (let node = target; node; node = Object.getPrototypeOf(node)) {
+          const own = Reflect.getOwnPropertyDescriptor(node, property)
+          if (own) return own
+        }
+        return undefined
+      })()
+      if (descriptor && 'value' in descriptor) return descriptor.value
+      return Reflect.get(target, property, receiver)
+    },
+  })
+}
+
 /** An `llm` service that records every validation and every streamed request. */
 function fakeLlm({ unsupported } = {}) {
   const calls = { resolutions: [], streams: [] }
-  return {
+  const service = {
     calls,
     resolveCallConfig(config) {
       calls.resolutions.push(config)
@@ -325,6 +368,11 @@ function fakeLlm({ unsupported } = {}) {
     },
     modelCatalog() { throw new Error('the effort path must not read the catalog') },
   }
+  // A real service carries a tracker, so every read is re-wrapped. The real
+  // one is writable and non-configurable (defined by the Service constructor),
+  // which is what lets a proxy answer `undefined` for it.
+  Object.defineProperty(service, TRACKER, { value: { property: 'ctx' }, writable: true, enumerable: false })
+  return service
 }
 
 const routed = (reasoningEffort) => ({ ...summaryTarget, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) })
@@ -365,7 +413,7 @@ test('a routed rule with an effort validates it and binds it to this transaction
   assert.notEqual(bound, llm, 'the shared llm service is never replaced')
   // A service view is re-wrapped per reader unless it reports no tracker, so
   // the bound view must hide it or the effort override would be lost.
-  assert.equal(bound[Symbol.for('cordis.tracker')], undefined)
+  assert.equal(bound[TRACKER], undefined)
   // Only `stream` is overridden; every other member still reaches the service.
   assert.throws(() => bound.modelCatalog(), /must not read the catalog/)
   await bound.stream({ provider: summaryTarget.provider, model: summaryTarget.model }).next()
@@ -377,22 +425,66 @@ test('a routed rule with an effort validates it and binds it to this transaction
   assert.deepEqual(probe.calls.released, probe.calls.provided.map(entry => entry.realm))
 })
 
-test('an unsupported effort warns and skips compaction instead of falling back', async () => {
+test('the bound view is what the backend resolves, so the effort reaches its call', async () => {
+  const calls = { compacts: [] }
+  const { backend } = basicBackend(calls)
+  const llm = fakeLlm()
+  const seen = []
+  const probe = fixture({
+    backend,
+    llm,
+    config: { ...options, rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget: routed('low') }] },
+    // Resolve `llm` the way the real summarizer does: through the realm's
+    // context, after the backend started.
+    isolated: (settings, realm, resolve) => ({
+      async compactRegion(start, end) {
+        calls.compacts.push({ start, end })
+        const service = resolve('llm')
+        assert.notEqual(service, undefined, 'the realm must expose the provisioned view')
+        await service.stream({ provider: summaryTarget.provider, model: summaryTarget.model }).next()
+        seen.push(service[TRACKER])
+        return { shadowedSeqs: [start] }
+      },
+    }),
+  })
+  await probe.step()
+  assert.equal(calls.compacts.length, 1)
+  // The call carried the effort, through the framework's re-wrapping proxy.
+  assert.deepEqual(llm.calls.streams, [{
+    provider: summaryTarget.provider, model: summaryTarget.model, reasoningEffort: 'low',
+  }])
+  // Hiding the tracker is what survives the re-wrap; a tracked view would be
+  // resolved from the prototype and lose the override.
+  assert.deepEqual(seen, [undefined])
+  // The provision preceded the backend, so the engine could resolve it at all.
+  assert.equal(probe.calls.lateProvides, undefined)
+})
+
+test('a rejected effort warns, compacts nothing, and spends no attempt', async () => {
   const calls = { compacts: [] }
   const { backend } = basicBackend(calls)
   const llm = fakeLlm({ unsupported: 'low' })
   const probe = fixture({
     backend,
     llm,
-    config: { ...options, rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget: routed('low') }] },
+    total: 1500,
+    // One attempt for the whole turn: if the rejected level spent it, the
+    // second step would report an exhausted budget instead of the level.
+    config: { ...options, maxAttempts: 1, rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget: routed('low') }] },
   })
-  await probe.step()
-  // No transaction was opened, so no failed marker pair was written.
-  assert.deepEqual(probe.calls.isolated, [])
+  // One turn, two steps: a mis-set level must not disable the next step.
+  await probe.step({ turn: 5 })
+  await probe.step({ turn: 5 })
+  assert.deepEqual(probe.calls.isolated, [], 'no transaction is opened for a rejected effort')
   assert.deepEqual(probe.calls.provided, [])
   assert.equal(calls.compacts.length, 0)
-  assert.equal(probe.calls.compacts.length, 0, 'the session backend was not used either')
-  assert.match(probe.calls.warnings[0], /summary via cheap\/luna failed: .*does not support reasoning effort "low"/)
+  assert.equal(probe.calls.compacts.length, 0)
+  // Both steps report the level, and neither is told the budget ran out.
+  assert.equal(probe.calls.warnings.length, 2)
+  for (const warning of probe.calls.warnings) {
+    assert.match(warning, /cannot use reasoning effort "low"/)
+    assert.doesNotMatch(warning, /budget exhausted/)
+  }
 })
 
 test('an effort without the llm service is reported rather than silently dropped', async () => {
@@ -408,7 +500,7 @@ test('an effort without the llm service is reported rather than silently dropped
   assert.match(probe.calls.warnings[0], /needs the llm service/)
 })
 
-test('the live schema accepts an effort on the summary route and keeps it absent by default', () => {
+test('the schema declares the effort and leaves it absent by default', () => {
   // Volatile fields are live references, so the run shape comes from normalizeConfig.
   const withEffort = normalizeConfig(Config({
     rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget: routed('high') }],
@@ -416,4 +508,8 @@ test('the live schema accepts an effort on the summary route and keeps it absent
   assert.equal(withEffort.rules[0].summaryTarget.reasoningEffort, 'high')
   const without = normalizeConfig(Config({ rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget: routed() }] }))
   assert.equal(without.rules[0].summaryTarget.reasoningEffort, undefined)
+  // Declared, not merely tolerated: schemastery passes unknown keys through,
+  // so only a type check proves the field is part of the contract. Length and
+  // whitespace are the normalizer's job, so the schema stays out of them.
+  assert.throws(() => Config({ rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget: routed(42) }] }), /reasoningEffort/)
 })

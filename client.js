@@ -60,7 +60,7 @@ window.__ModuleLoader__.load({
       "summaryUnconfirmed": "不在实时目录中",
       "summaryEffort": "摘要推理等级",
       "summaryEffortDefault": "沿用模型默认",
-      "summaryEffortUnknown": "实时目录未列出该模型的推理等级，仅能沿用模型默认。",
+      "summaryEffortUnknown": "实时目录未列出这个摘要模型的推理等级，只能沿用模型默认。",
       "summaryProviderNotice": "待压缩的历史和本次摘要请求的提示、工具定义会发送至 {provider}。主对话模型不变。"
     }
 
@@ -118,7 +118,7 @@ window.__ModuleLoader__.load({
       "summaryUnconfirmed": "Not in the live catalog",
       "summaryEffort": "Summary reasoning effort",
       "summaryEffortDefault": "Use the model default",
-      "summaryEffortUnknown": "The live catalog lists no reasoning effort for this model, so only its default is available.",
+      "summaryEffortUnknown": "The live catalog lists no reasoning effort for this summary model, so only its default is available.",
       "summaryProviderNotice": "The selected history and this summary request's prompts and tool definitions are sent to {provider}. The chat model stays the same."
     }
 
@@ -338,12 +338,6 @@ window.__ModuleLoader__.load({
       return [...rows.values()].filter(row => row.dormant !== true)
     }
 
-    /** The efforts the live catalog advertises for one exact route. */
-    function effortsFor(rows, target) {
-      const efforts = rows.get(ruleKey(target))?.efforts
-      return Array.isArray(efforts) ? efforts : []
-    }
-
     /**
      * Pick the reasoning effort for the model that writes summaries.
      *
@@ -351,14 +345,25 @@ window.__ModuleLoader__.load({
      * while one is set: the session's own summary settings keep their effort.
      * A saved effort the catalog no longer advertises stays visible and
      * selectable rather than being silently rewritten.
+     *
+     * An empty list has several causes — the catalog is still loading, it
+     * failed, or the route is not listed at all — and only the last one is
+     * about the model, so the hint is reserved for a route the live catalog
+     * actually described.
      */
     function SummaryEffortSelect({ t, rule, rows, disabled, onChange }) {
       const id = React.useId()
-      const target = rule.summaryTarget
+      // The schema allows a stored `null`; only an absent route means "no override".
+      const target = rule.summaryTarget ?? undefined
       if (target === undefined) return null
-      const efforts = effortsFor(rows, target)
+      const row = rows.get(ruleKey(target))
+      const efforts = Array.isArray(row?.efforts) ? row.efforts : []
       const value = target.reasoningEffort ?? ''
       const known = value === '' || efforts.some(effort => effort.id === value)
+      // Only claim the model offers no levels when the live catalog answered
+      // for this exact route; a loading, failed or undiscovered route says
+      // nothing about its capabilities.
+      const described = row?.described === true
       return h('div', { style: { marginTop: '6px', maxWidth: '240px' } },
         h('label', { htmlFor: id, style: styles.label }, t('summaryEffort')),
         h('select', {
@@ -375,7 +380,7 @@ window.__ModuleLoader__.load({
           key: effort.id, value: effort.id, title: effort.description,
         }, effort.name)),
         ),
-        efforts.length === 0 ? h('p', { style: styles.hint }, t('summaryEffortUnknown')) : null,
+        described && efforts.length === 0 ? h('p', { style: styles.hint }, t('summaryEffortUnknown')) : null,
       )
     }
 
@@ -388,7 +393,8 @@ window.__ModuleLoader__.load({
      */
     function SummaryModelSelect({ t, rule, candidates, disabled, onChange }) {
       const id = React.useId()
-      const target = rule.summaryTarget
+      // The schema allows a stored `null`; only an absent route means "no override".
+      const target = rule.summaryTarget ?? undefined
       const value = target === undefined ? '' : ruleKey(target)
       const known = target === undefined
         || candidates.some(row => row.provider === target.provider && row.model === target.model)
@@ -463,9 +469,15 @@ window.__ModuleLoader__.load({
           if (typeof model !== 'string') continue
           const key = ruleKey({ provider, model })
           // Only the live catalog reports efforts; a configured model keeps
-          // whatever the host generation advertised, or none.
+          // whatever the host generation advertised, or none. `described`
+          // records that the catalog really spoke about this route, so an
+          // absent effort list can be reported as "this model offers none"
+          // rather than guessed from a catalog that never answered.
           const efforts = Array.isArray(reasoning?.efforts) ? reasoning.efforts : undefined
-          rows.set(key, { ...rows.get(key), provider, model, dormant: false, ...(efforts === undefined ? {} : { efforts }) })
+          rows.set(key, {
+            ...rows.get(key), provider, model, dormant: false, described: true,
+            ...(efforts === undefined ? {} : { efforts }),
+          })
         }
       }
       return rows
@@ -571,14 +583,16 @@ window.__ModuleLoader__.load({
         if (next === undefined) return rest
         // Efforts are route-owned, so a different route starts from its own
         // default rather than inheriting one the previous model happened to offer.
-        const kept = rule.summaryTarget?.provider === next.provider && rule.summaryTarget?.model === next.model
-          ? rule.summaryTarget.reasoningEffort
+        const previous = rule.summaryTarget
+        const sameRoute = previous?.provider === next.provider && previous?.model === next.model
+        const kept = sameRoute && typeof previous.reasoningEffort === 'string' && previous.reasoningEffort !== ''
+          ? previous.reasoningEffort
           : undefined
         return { ...rest, summaryTarget: kept === undefined ? next : { ...next, reasoningEffort: kept } }
       }))
       /** Set or clear one rule's summary effort without touching its route. */
       const setSummaryEffort = (key, reasoningEffort) => write('rules', rules.map(rule => {
-        if (ruleKey(rule) !== key || rule.summaryTarget === undefined) return rule
+        if (ruleKey(rule) !== key || rule.summaryTarget === undefined || rule.summaryTarget === null) return rule
         const { reasoningEffort: _, ...target } = rule.summaryTarget
         return { ...rule, summaryTarget: reasoningEffort === '' ? target : { ...target, reasoningEffort } }
       }))

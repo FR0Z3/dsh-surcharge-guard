@@ -25,7 +25,9 @@ Thresholds and margins accept values such as `272000`, `272K`, and `1.05M`. Chan
 
 The summary model is used only for compaction triggered by that rule. The chat model, manual compaction, and DSH's own compaction policy keep their settings. If you choose another provider, it receives the selected history and the prompts and tool definitions in that summary request.
 
-The reasoning effort belongs to the summary model: it appears only once a custom summary model is chosen, and switching models returns to that model's own default. Levels come from the live catalog, so only what the chosen model actually supports is listed; a saved level the catalog no longer offers stays visible and flagged rather than being silently rewritten. If the route cannot serve the chosen level at run time, the guard logs a warning and skips that compaction instead of substituting another level.
+The reasoning effort belongs to the summary model: it appears only once a custom summary model is chosen, and switching models returns to that model's own default. Levels come from the live catalog; while it is loading, after it fails to load, or when the model is not listed, no levels are shown and only the model default is available. A saved level the catalog no longer offers stays visible and flagged rather than being silently rewritten.
+
+If the route cannot serve the chosen level at run time, the guard logs a warning and does not run that compaction: no marker is written, no other level is substituted, and the attempt does not count against the summary attempt limit, so one mistyped level cannot disable the rest of the turn. The step itself continues and can still cross the line.
 
 ## Limitations
 
