@@ -35,6 +35,37 @@ test('normalizeRule keeps a complete summary route and ignores a partial one', (
   assert.equal(normalizeRule({ ...rule, summaryTarget: { provider: 'q' } }).summaryTarget, undefined)
 })
 
+test('normalizeRule keeps a summary effort with its route and drops it with the route', () => {
+  const rule = { provider: 'p', model: 'm', surchargeAtTokens: 100 }
+  const target = { provider: 'q', model: 'small' }
+  assert.deepEqual(
+    normalizeRule({ ...rule, summaryTarget: { ...target, reasoningEffort: ' low ' } }).summaryTarget,
+    { ...target, reasoningEffort: 'low' },
+  )
+  // A blank effort means the route default, not an empty effort id.
+  assert.deepEqual(
+    normalizeRule({ ...rule, summaryTarget: { ...target, reasoningEffort: '  ' } }).summaryTarget,
+    target,
+  )
+  // The effort is route-owned: no route means no effort either.
+  assert.equal(normalizeRule({ ...rule, summaryTarget: { reasoningEffort: 'low' } }).summaryTarget, undefined)
+})
+
+test('normalizeRule repairs or drops an effort an editor could have mangled', () => {
+  const rule = { provider: 'p', model: 'm', surchargeAtTokens: 100 }
+  const target = { provider: 'q', model: 'small' }
+  const effortOf = reasoningEffort => normalizeRule({ ...rule, summaryTarget: { ...target, reasoningEffort } }).summaryTarget
+  // Zero-width characters are not `WhiteSpace`, so a plain trim would keep them
+  // and produce an id no catalog can match; they are stripped instead.
+  assert.deepEqual(effortOf('\u200blow'), { ...target, reasoningEffort: 'low' })
+  assert.deepEqual(effortOf('\ufefflow\u200d'), { ...target, reasoningEffort: 'low' })
+  // An effort made only of invisible characters is the default, not an id.
+  assert.deepEqual(effortOf('\u200b\u200b'), target)
+  // An over-long value is dropped rather than truncated into a different id.
+  assert.deepEqual(effortOf('x'.repeat(65)), target)
+  assert.deepEqual(effortOf('x'.repeat(64)), { ...target, reasoningEffort: 'x'.repeat(64) })
+})
+
 test('normalizeConfig drops duplicates and fills defaults', () => {
   const config = normalizeConfig({
     rules: [

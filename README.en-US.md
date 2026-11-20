@@ -18,17 +18,23 @@ After enabling the plugin, open **Plugins → Surcharge guard**:
 | Keep more recent history | Raise the retain ratio within `0.01–0.9` |
 | Limit compaction attempts per turn | Set the summary attempt limit, default `2`; `0` disables guard compaction |
 | Write summaries with a cheaper model | Pick a provider and model under the rule's **Summary model**; choose **Use existing summary settings** to restore the default |
+| Spend less on summary reasoning | After choosing a summary model, pick one of its **Summary reasoning effort** levels; **Use the model default** overrides nothing |
 | Pause protection without removing rules | Turn the master switch off |
 
 Thresholds and margins accept values such as `272000`, `272K`, and `1.05M`. Changes apply to subsequent steps without restarting the plugin.
 
 The summary model is used only for compaction triggered by that rule. The chat model, manual compaction, and DSH's own compaction policy keep their settings. If you choose another provider, it receives the selected history and the prompts and tool definitions in that summary request.
 
+The reasoning effort belongs to the summary model: it appears only once a custom summary model is chosen, and switching models returns to that model's own default. Levels come from the live catalog; while it is loading, after it fails to load, or when the model is not listed, no levels are shown and only the model default is available. A saved level the catalog no longer offers stays visible and flagged rather than being silently rewritten.
+
+If the route cannot serve the chosen level at run time, the guard logs a warning and does not run that compaction: no marker is written, no other level is substituted, and the attempt does not count against the summary attempt limit, so one mistyped level cannot disable the rest of the turn. The step itself continues and can still cross the line.
+
 ## Limitations
 
 - This is **best-effort protection, not a billing cap**. The guard estimates committed history and messages admitted for the step. Later prompt updates, tool definitions, attachment pricing, retries, and provider counts can differ.
 - If there is no safe range, summarization fails, or the estimate remains above the line, the original request is not blocked. The session's DSH backend runs compaction, and its summary request may incur charges. The guard's attempt limit does not cap DSH's built-in compaction or internal backend retries.
 - A custom summary model needs DSH's Basic compaction backend and enough context capacity. Switching models usually cannot reuse the chat model's prefix cache, so the summary itself may be slower or cost more. If the selected route fails, the guard logs a warning and continues the step without falling back to the original route, and that step can still cross the line.
+- A summary reasoning effort applies only to the chosen summary model; DSH's own summary settings, manual compaction, and the chat route keep theirs. Effort names are provider-defined, so the same name need not mean the same thinking budget across models.
 
 ## Development
 

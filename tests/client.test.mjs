@@ -23,8 +23,13 @@ const rule = { provider: 'p', model: 'gpt-6-sol', surchargeAtTokens: 272400, ena
 const normal = { enabled: true, safetyMarginTokens: 20000, retainRatio: 0.16, maxAttempts: 2, rules: [rule] }
 const absent = { status: 'unavailable', writable: false }
 const emptyGroups = { ok: true, value: { groups: [], failures: [] } }
+const efforts = [
+  { id: 'off', name: 'Off' },
+  { id: 'low', name: 'Low' },
+  { id: 'high', name: 'High', description: 'Deeper reasoning' },
+]
 const groups = { ok: true, value: { groups: [{ id: 'p', models: [
-  { id: rule.model }, { id: 'gpt-6-luna' }, { id: 'gptish-model' },
+  { id: rule.model }, { id: 'gpt-6-luna', reasoning: { efforts, defaultEffort: 'high' } }, { id: 'gptish-model' },
 ] }], failures: [] } }
 
 function formStore(value, { writable = true, status = 'ready', refusal = false, error, beforeWrite } = {}) {
@@ -333,4 +338,124 @@ test('a refused summary write keeps the previously saved route on screen', async
   await choose(ui, '')
   assert.equal(select(ui).props.value, JSON.stringify(['p', 'gpt-6-luna']))
   assert.match(ui.text(), /Save failed/)
+})
+
+// ---- per-rule summary reasoning effort --------------------------------------
+
+const effortLabel = (provider = 'p', model = 'gpt-6-luna') => `${en.summaryEffort} ${provider}/${model}`
+const effortSelect = (ui, provider, model) => ui.root.root.findByProps({ 'aria-label': effortLabel(provider, model) })
+const chooseEffort = (ui, value) => firing(() => effortSelect(ui), 'onChange', { target: { value } })
+const effortOptionValues = ui => effortSelect(ui).findAllByType('option').map(node => node.props.value)
+
+test('offers the efforts of the chosen summary route with the model default first', async t => {
+  const summaryTarget = { provider: 'p', model: 'gpt-6-luna' }
+  const ui = await mount(t, { form: formStore({ ...normal, rules: [{ ...rule, summaryTarget }] }) })
+  assert.equal(effortSelect(ui).props.value, '')
+  assert.deepEqual(effortOptionValues(ui), ['', 'off', 'low', 'high'])
+  // Names come from the catalog; descriptions stay on the option title.
+  const high = effortSelect(ui).findAllByType('option').find(node => node.props.value === 'high')
+  assert.equal(high.children.join(''), 'High')
+  assert.equal(high.props.title, 'Deeper reasoning')
+})
+
+test('the effort choice appears only once a summary route is chosen', async t => {
+  const ui = await mount(t)
+  assert.equal(ui.root.root.findAllByProps({ 'aria-label': effortLabel() }).length, 0)
+  await choose(ui, JSON.stringify(['p', 'gpt-6-luna']))
+  assert.equal(effortSelect(ui).props.value, '', 'a new route starts from its own default')
+  // Clearing the route clears the effort with it.
+  await choose(ui, '')
+  assert.equal(ui.root.root.findAllByProps({ 'aria-label': effortLabel() }).length, 0)
+})
+
+test('writes exactly the chosen effort and clears it back to the default', async t => {
+  const summaryTarget = { provider: 'p', model: 'gpt-6-luna' }
+  const ui = await mount(t, { form: formStore({ ...normal, rules: [{ ...rule, summaryTarget }] }) })
+  await chooseEffort(ui, 'low')
+  assert.deepEqual(ui.form.writes, [mutation('rules', [{
+    ...rule, summaryTarget: { ...summaryTarget, reasoningEffort: 'low' },
+  }])])
+  assert.equal(effortSelect(ui).props.value, 'low')
+  await chooseEffort(ui, '')
+  assert.deepEqual(ui.form.writes[1].ops[0].value, [{ ...rule, summaryTarget }])
+})
+
+test('switching the summary model drops an effort that belonged to the old route', async t => {
+  const summaryTarget = { provider: 'p', model: 'gpt-6-luna', reasoningEffort: 'low' }
+  const ui = await mount(t, { form: formStore({ ...normal, rules: [{ ...rule, summaryTarget }] }) })
+  await choose(ui, JSON.stringify(['q', 'other']))
+  assert.deepEqual(ui.form.writes[0].ops[0].value[0].summaryTarget, { provider: 'q', model: 'other' })
+  // Re-picking the same route keeps its effort.
+  const same = await mount(t, { form: formStore({ ...normal, rules: [{ ...rule, summaryTarget }] }) })
+  await choose(same, JSON.stringify(['p', 'gpt-6-luna']))
+  assert.deepEqual(same.form.writes[0].ops[0].value[0].summaryTarget, summaryTarget)
+})
+
+test('re-picking a route whose stored effort is blank writes no empty effort', async t => {
+  // "Default" has one spelling in the document: an absent field. A stored
+  // empty string must not be perpetuated just because the route was re-picked.
+  const summaryTarget = { provider: 'p', model: 'gpt-6-luna', reasoningEffort: '' }
+  const ui = await mount(t, { form: formStore({ ...normal, rules: [{ ...rule, summaryTarget }] }) })
+  await choose(ui, JSON.stringify(['p', 'gpt-6-luna']))
+  assert.deepEqual(ui.form.writes[0].ops[0].value[0].summaryTarget, { provider: 'p', model: 'gpt-6-luna' })
+})
+
+test('keeps a saved effort the catalog no longer offers visible and flagged', async t => {
+  const summaryTarget = { provider: 'p', model: 'gpt-6-luna', reasoningEffort: 'ultra' }
+  const ui = await mount(t, { form: formStore({ ...normal, rules: [{ ...rule, summaryTarget }] }) })
+  assert.equal(effortSelect(ui).props.value, 'ultra')
+  const saved = effortSelect(ui).findAllByType('option').find(node => node.props.value === 'ultra')
+  assert.match(saved.children.join(''), /ultra/)
+  assert.match(saved.children.join(''), new RegExp(en.summaryUnconfirmed))
+})
+
+test('explains a route whose live catalog advertises no reasoning effort', async t => {
+  const summaryTarget = { provider: 'p', model: rule.model }
+  const ui = await mount(t, { form: formStore({ ...normal, rules: [{ ...rule, summaryTarget }] }) })
+  assert.deepEqual(effortSelect(ui, 'p', rule.model).findAllByType('option').map(node => node.props.value), [''])
+  assert.ok(ui.text().includes(en.summaryEffortUnknown))
+})
+
+test('does not claim a route has no levels when the catalog never described it', async t => {
+  const summaryTarget = { provider: 'gone', model: 'retired' }
+  const effortOptions = ui => effortSelect(ui, 'gone', 'retired').findAllByType('option').map(node => node.props.value)
+
+  // The route is absent from the catalog entirely: the summary-model select
+  // already flags that, so the effort hint must stay silent rather than
+  // assert a capability nothing observed.
+  const absent = await mount(t, { form: formStore({ ...normal, rules: [{ ...rule, summaryTarget }] }) })
+  assert.deepEqual(effortOptions(absent), [''])
+  assert.equal(absent.text().includes(en.summaryEffortUnknown), false)
+
+  // Nor when the catalog itself could not be read.
+  const offline = await mount(t, {
+    form: formStore({ ...normal, rules: [{ ...rule, summaryTarget }] }),
+    modelCatalog: async () => ({ ok: false, error: { message: 'offline' } }),
+  })
+  assert.equal(offline.text().includes(en.summaryEffortUnknown), false)
+
+  // A model declared in the provider settings but never described by a live
+  // catalog is the same unknown: the row exists, the capability does not.
+  const declared = formStore({ providers: { gone: { models: [{ id: 'retired' }] } } })
+  const undeclaredLive = await mount(t, {
+    form: formStore({ ...normal, rules: [{ ...rule, summaryTarget }] }),
+    declared,
+    modelCatalog: async () => ({ ok: false, error: { message: 'offline' } }),
+  })
+  assert.equal(undeclaredLive.text().includes(en.summaryEffortUnknown), false)
+
+  // The catalog answering with a provider failure is also not an answer.
+  const failedProvider = await mount(t, {
+    form: formStore({ ...normal, rules: [{ ...rule, summaryTarget }] }),
+    declared,
+    modelCatalog: async () => ({ ok: true, value: { groups: [], failures: [{ id: 'gone', message: 'unreachable' }] } }),
+  })
+  assert.equal(failedProvider.text().includes(en.summaryEffortUnknown), false)
+})
+
+test('survives a stored null summary target instead of crashing the panel', async t => {
+  // The Config schema permits `summaryTarget: null`, so the panel must render.
+  const ui = await mount(t, { form: formStore({ ...normal, rules: [{ ...rule, summaryTarget: null }] }) })
+  assert.equal(select(ui).props.value, '')
+  assert.equal(ui.root.root.findAllByProps({ 'aria-label': effortLabel() }).length, 0)
 })
