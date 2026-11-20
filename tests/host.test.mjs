@@ -513,3 +513,39 @@ test('the schema declares the effort and leaves it absent by default', () => {
   // whitespace are the normalizer's job, so the schema stays out of them.
   assert.throws(() => Config({ rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget: routed(42) }] }), /reasoningEffort/)
 })
+
+test('a truncated summary warns, keeps the history, and is not mistaken for a bad level', async () => {
+  // Basic counts provider reasoning tokens against `maxTokens` and fails closed
+  // on a `max-tokens` finish, so a high effort under a small cap truncates.
+  // That is a summary failure, not an unsupported level: the documented shape
+  // is a warning, an uncompacted step, and a spent attempt.
+  const calls = { compacts: [] }
+  const { backend } = basicBackend(calls)
+  const llm = fakeLlm()
+  const probe = fixture({
+    backend,
+    llm,
+    total: 1500,
+    config: { ...options, maxAttempts: 1, rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget: routed('max') }] },
+    isolated: () => ({
+      compactRegion: () => {
+        throw new Error('summarization truncated at the token cap (incomplete checkpoint)')
+      },
+    }),
+  })
+  await probe.step({ turn: 3 })
+  // The level itself was supported, so the pre-flight passed and a transaction
+  // did open; the failure came from the summary request.
+  assert.deepEqual(llm.calls.resolutions, [{ ...summaryTarget, reasoningEffort: 'max' }])
+  assert.equal(probe.calls.isolated.length, 1)
+  assert.equal(probe.calls.disposed.length, 1, 'the temporary backend is still disposed')
+  // The warning names truncation, not the level.
+  assert.match(probe.calls.warnings[0], /truncated at the token cap/)
+  assert.doesNotMatch(probe.calls.warnings[0], /cannot use reasoning effort/)
+  // Nothing was recorded against the surface, so the history is unchanged.
+  assert.equal(probe.calls.compacts.length, 0)
+  // The attempt was spent: the next step reports an exhausted budget instead of
+  // retrying a summary that would truncate again.
+  await probe.step({ turn: 3 })
+  assert.match(probe.calls.warnings[1], /budget exhausted/)
+})
