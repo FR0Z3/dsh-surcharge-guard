@@ -12,8 +12,9 @@ function compactionFor(ctx, agent) {
  *
  * `GenerateOptions` carries the effort per call and Basic's summarizer builds
  * the request itself, so the selection rides on the `llm` service the engine
- * resolves. Basic's own config cannot carry it: its schema rejects keys it does
- * not know, and `reasoningEffort` is not one of its summary settings.
+ * resolves. Basic's own config cannot carry it: its loader rejects keys it does
+ * not know in `resolveConfig`, and `reasoningEffort` is not one of its summary
+ * settings.
  *
  * The service a context hands out is itself a proxy that the framework wraps
  * again for every reader. Reporting no tracker keeps this view from being
