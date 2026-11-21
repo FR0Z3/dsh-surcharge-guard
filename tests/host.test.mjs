@@ -533,6 +533,10 @@ test('a truncated summary warns, keeps the history, and is not mistaken for a ba
       },
     }),
   })
+  // A custom `compactRegion` bypasses the fixture's default implementation, so
+  // no compact call is recorded and an empty log proves nothing. The surface
+  // itself is the evidence that the history survived.
+  const surface = [...probe.session.surface.nodes]
   await probe.step({ turn: 3 })
   // The level itself was supported, so the pre-flight passed and a transaction
   // did open; the failure came from the summary request.
@@ -542,10 +546,11 @@ test('a truncated summary warns, keeps the history, and is not mistaken for a ba
   // The warning names truncation, not the level.
   assert.match(probe.calls.warnings[0], /truncated at the token cap/)
   assert.doesNotMatch(probe.calls.warnings[0], /cannot use reasoning effort/)
-  // Nothing was recorded against the surface, so the history is unchanged.
-  assert.equal(probe.calls.compacts.length, 0)
+  // The failed summary left the history exactly as it was.
+  assert.deepEqual(probe.session.surface.nodes, surface)
   // The attempt was spent: the next step reports an exhausted budget instead of
   // retrying a summary that would truncate again.
   await probe.step({ turn: 3 })
   assert.match(probe.calls.warnings[1], /budget exhausted/)
+  assert.deepEqual(probe.session.surface.nodes, surface)
 })
