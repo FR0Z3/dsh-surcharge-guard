@@ -519,8 +519,13 @@ test('a truncated summary warns, keeps the history, and is not mistaken for a ba
   // on a `max-tokens` finish, so a high effort under a small cap truncates.
   // That is a summary failure, not an unsupported level: the documented shape
   // is a warning, an uncompacted step, and a spent attempt.
-  const calls = { compacts: [] }
-  const { backend } = basicBackend(calls)
+  //
+  // The fixture records a compact call only in its *default* engine, and this
+  // test supplies its own `compactRegion`, so that log is constant here and
+  // asserting on it would pass no matter what happened. The session surface is
+  // the real evidence, because Basic replaces that span in the log. Verified by
+  // making the stub append a node before throwing: this test then fails.
+  const backend = basicBackend({ compacts: [] }).backend
   const llm = fakeLlm()
   const probe = fixture({
     backend,
@@ -533,9 +538,6 @@ test('a truncated summary warns, keeps the history, and is not mistaken for a ba
       },
     }),
   })
-  // A custom `compactRegion` bypasses the fixture's default implementation, so
-  // no compact call is recorded and an empty log proves nothing. The surface
-  // itself is the evidence that the history survived.
   const surface = [...probe.session.surface.nodes]
   await probe.step({ turn: 3 })
   // The level itself was supported, so the pre-flight passed and a transaction
@@ -549,7 +551,8 @@ test('a truncated summary warns, keeps the history, and is not mistaken for a ba
   // The failed summary left the history exactly as it was.
   assert.deepEqual(probe.session.surface.nodes, surface)
   // The attempt was spent: the next step reports an exhausted budget instead of
-  // retrying a summary that would truncate again.
+  // retrying a summary that would truncate again. This second surface check
+  // guards the second step, which the first one never reaches.
   await probe.step({ turn: 3 })
   assert.match(probe.calls.warnings[1], /budget exhausted/)
   assert.deepEqual(probe.session.surface.nodes, surface)
