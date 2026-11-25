@@ -13,9 +13,9 @@ window.__ModuleLoader__.load({
       "margin": "安全余量",
       "marginHint": "在加价线以下多少 token 触发压缩。余量越大，触发越早。",
       "retain": "保留比例",
-      "retainHint": "按触发线的比例计算近期历史保留量，范围为 0.01–0.9。",
+      "retainHint": "近期历史的保留上限，按触发线的比例计算（0.01–0.9）；缺口大时会压得更深。",
       "maxAttempts": "摘要次数上限",
-      "maxAttemptsHint": "每轮最多发起多少次压缩；0 表示不发起。",
+      "maxAttemptsHint": "每轮最多发起多少次压缩，每个步骤最多一次；0 表示不发起。",
       "rules": "规则",
       "rulesEmpty": "还没有规则。用下面的按钮按家族批量添加，或手动添加单条。",
       "colProvider": "服务商",
@@ -28,8 +28,11 @@ window.__ModuleLoader__.load({
       "off": "已停用",
       "cap": "到线前触发于",
       "remove": "移除",
+      "enableAll": "全部启用",
+      "disableAll": "全部停用",
+      "rulesSummary": "已启用 {on}/{total}",
       "addTitle": "一键添加",
-      "addHint": "按模型家族预填建议阈值。新增规则默认停用，请按具体服务商的定价核对后再启用。",
+      "addHint": "按模型家族预填建议阈值。新增规则默认启用；预填的阈值只是建议值，请按具体服务商的定价核对后调整。",
       "addFamily": "预填 {family} 规则",
       "addManual": "手动添加规则",
       "scan": "重新扫描模型",
@@ -48,7 +51,7 @@ window.__ModuleLoader__.load({
       "dormant": "未出现在实时目录",
       "enableRule": "启用",
       "disableRule": "停用",
-      "manualHint": "输入准确的服务商和模型 ID，以及该服务商的加价阈值。新增规则默认停用。",
+      "manualHint": "输入准确的服务商和模型 ID，以及该服务商的加价阈值。新增规则默认启用。",
       "manualProvider": "服务商 ID",
       "manualModel": "模型 ID",
       "manualLine": "加价阈值（token）",
@@ -71,9 +74,9 @@ window.__ModuleLoader__.load({
       "margin": "Safety margin",
       "marginHint": "Trigger this many tokens below the surcharge line. A larger margin triggers compaction earlier.",
       "retain": "Retain ratio",
-      "retainHint": "Fraction of the trigger budget to retain as recent history, from 0.01 to 0.9.",
+      "retainHint": "Ceiling for recent history kept verbatim, as a fraction of the trigger (0.01–0.9); a large gap folds deeper.",
       "maxAttempts": "Summary attempt limit",
-      "maxAttemptsHint": "Maximum compaction attempts per turn. Set to 0 to disable guard compaction.",
+      "maxAttemptsHint": "Maximum compaction attempts per turn, at most one per step. Set to 0 to disable guard compaction.",
       "rules": "Rules",
       "rulesEmpty": "No rules yet. Add a model family in bulk below, or add one manually.",
       "colProvider": "Provider",
@@ -86,8 +89,11 @@ window.__ModuleLoader__.load({
       "off": "Off",
       "cap": "Triggers at",
       "remove": "Remove",
+      "enableAll": "Enable all",
+      "disableAll": "Disable all",
+      "rulesSummary": "{on}/{total} enabled",
       "addTitle": "Quick add",
-      "addHint": "Prefill suggested family thresholds. New rules are off until you confirm the price for the specific provider and enable them.",
+      "addHint": "Prefill suggested family thresholds. New rules start enabled; the prefilled threshold is only a suggestion, so check the price for the specific provider.",
       "addFamily": "Prefill {family} rules",
       "addManual": "Add a rule manually",
       "scan": "Rescan models",
@@ -106,7 +112,7 @@ window.__ModuleLoader__.load({
       "dormant": "Not in the live catalog",
       "enableRule": "Enable",
       "disableRule": "Disable",
-      "manualHint": "Enter the exact provider and model IDs and the provider’s surcharge threshold. New rules start off.",
+      "manualHint": "Enter the exact provider and model IDs and the provider’s surcharge threshold. New rules start enabled.",
       "manualProvider": "Provider ID",
       "manualModel": "Model ID",
       "manualLine": "Surcharge threshold (tokens)",
@@ -261,6 +267,19 @@ window.__ModuleLoader__.load({
         borderRadius: '8px',
       },
       actions: { display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center' },
+      badge: { display: 'inline-flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' },
+      off: { opacity: 0.5 },
+    }
+
+    /** A colored dot so the rule's state reads before the label does. */
+    function statusDot(on) {
+      return {
+        flex: '0 0 auto',
+        width: '7px',
+        height: '7px',
+        borderRadius: '50%',
+        background: on ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-border-l2)',
+      }
     }
 
     /** One labeled field row. */
@@ -511,6 +530,8 @@ window.__ModuleLoader__.load({
       const [draft, setDraft] = React.useState({ provider: '', model: '', threshold: '' })
       const rows = React.useMemo(() => mergeCatalog(declared.value?.providers, catalog), [declared.value, catalog])
       const rules = snapshot.value?.rules ?? []
+      const onCount = rules.filter(entry => entry.enabled !== false).length
+      const allOn = rules.length > 0 && onCount === rules.length
       const enabled = snapshot.value?.enabled !== false
       const margin = snapshot.value?.safetyMarginTokens ?? 20000
       const retain = snapshot.value?.retainRatio ?? 0.16
@@ -565,7 +586,7 @@ window.__ModuleLoader__.load({
           setNotice(t('invalidManualRule'))
           return
         }
-        const rule = { provider, model, surchargeAtTokens, enabled: false }
+        const rule = { provider, model, surchargeAtTokens, enabled: true }
         if (existing.has(ruleKey(rule))) {
           setNotice(t('duplicateRule'))
           return
@@ -617,7 +638,15 @@ window.__ModuleLoader__.load({
         h('div', { style: styles.group },
           h('div', { style: styles.actions },
             h('h4', { style: styles.groupTitle }, t('rules')),
+            rules.length === 0 ? null : h('span', { style: styles.intro },
+              t('rulesSummary').replace('{on}', String(onCount)).replace('{total}', String(rules.length))),
             h('span', { role: 'status', style: styles.intro }, writeStatus === null ? null : t(writeStatus)),
+            // One switch for the whole list: the common case is enabling the
+            // rules just prefilled, or silencing all of them at once.
+            rules.length === 0 ? null : h('button', {
+              type: 'button', disabled, style: styles.button,
+              onClick: () => write('rules', rules.map(entry => ({ ...entry, enabled: !allOn }))),
+            }, t(allOn ? 'disableAll' : 'enableAll')),
           ),
           rules.length === 0 ? h('p', { style: styles.empty }, t('rulesEmpty')) :
             h('table', { style: styles.table },
@@ -632,9 +661,9 @@ window.__ModuleLoader__.load({
                   row?.dormant ? t('dormant') : null,
                 ].filter(Boolean)
                 return h('tr', { key },
-                  h('td', { style: { ...styles.td, ...styles.mono } }, rule.provider),
+                  h('td', { style: { ...styles.td, ...styles.mono } }, h('span', { style: state ? null : styles.off }, rule.provider)),
                   h('td', { style: styles.td },
-                    rule.model,
+                    h('span', { style: state ? null : styles.off }, rule.model),
                     details.length ? h('div', { style: styles.hint }, details.join(' · ')) : null,
                     h(SummaryModelSelect, {
                       t, rule, candidates: summaryCandidates, disabled,
@@ -655,13 +684,23 @@ window.__ModuleLoader__.load({
                     onCommit: surchargeAtTokens => editRule(key, { surchargeAtTokens }, 'thresholdSaved'),
                   })),
                   h('td', { style: styles.td }, formatTokens(Math.max(1, rule.surchargeAtTokens - margin))),
-                  h('td', { style: styles.td }, t(state ? 'on' : 'off')),
+                  // State lives with the switch that changes it: a label in one
+                  // column and a button in another made "on" and "off" easy to mix up.
                   h('td', { style: styles.td }, h('div', { style: styles.actions },
-                    h('button', { type: 'button', disabled, style: styles.button,
-                      onClick: () => editRule(key, { enabled: !state }) }, t(state ? 'disableRule' : 'enableRule')),
-                    h('button', { type: 'button', disabled, style: { ...styles.button, ...styles.danger },
-                      onClick: () => write('rules', rules.filter(entry => ruleKey(entry) !== key)) }, t('remove')),
+                    h('span', { style: styles.badge },
+                      h('span', { 'aria-hidden': true, style: statusDot(state) }),
+                      t(state ? 'on' : 'off')),
+                    h(Toggle, {
+                      // The name states the action this switch performs, so the
+                      // state is never ambiguous to a reader that cannot see it.
+                      label: `${t(state ? 'disableRule' : 'enableRule')} ${rule.provider}/${rule.model}`,
+                      checked: state, disabled,
+                      onChange: next => editRule(key, { enabled: next }),
+                    }),
                   )),
+                  h('td', { style: styles.td }, h('button', { type: 'button', disabled,
+                    style: { ...styles.button, ...styles.danger },
+                    onClick: () => write('rules', rules.filter(entry => ruleKey(entry) !== key)) }, t('remove'))),
                 )
               })),
             ),
@@ -681,7 +720,7 @@ window.__ModuleLoader__.load({
                 key: id, type: 'button', style: styles.button,
                 disabled: disabled || found.length === 0,
                 onClick: () => write('rules', [...rules, ...found.map(({ provider, model }) => ({
-                  provider, model, surchargeAtTokens, enabled: false,
+                  provider, model, surchargeAtTokens, enabled: true,
                 }))]),
               }, `${t('addFamily').replace('{family}', label)} (${found.length})`)
             }),
