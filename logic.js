@@ -4,10 +4,25 @@ export const DEFAULTS = Object.freeze({
   safetyMarginTokens: 20000,
   retainRatio: 0.16,
   maxAttempts: 2,
+  /** Treat the surcharge line as a hard boundary: prune, force a fold, then block. */
+  enforceLine: true,
 })
 
 /** Verbatim tail kept even when the gap would allow folding deeper. */
 const MIN_TAIL_TOKENS = 8000
+
+/** Fixed text density the meter prices unmeasured content with. */
+const CHARS_PER_TOKEN = 4
+
+/** Per-block structural overhead the meter adds to a payload. */
+const BLOCK_OVERHEAD = 4
+
+/** Bounds of the observed provider/heuristic ratio. */
+export const CALIBRATION = Object.freeze({
+  min: 1,
+  max: 8,
+  release: 0.9,
+})
 
 /** Unwrap one live (volatile) config reference. */
 function liveValue(field, fallback) {
@@ -93,6 +108,7 @@ export function normalizeConfig(raw) {
     ),
     retainRatio: ratioOf(liveValue(source.retainRatio, DEFAULTS.retainRatio), DEFAULTS.retainRatio),
     maxAttempts: nonNegativeInteger(liveValue(source.maxAttempts, DEFAULTS.maxAttempts), DEFAULTS.maxAttempts),
+    enforceLine: liveValue(source.enforceLine, DEFAULTS.enforceLine) !== false,
   }
 }
 
@@ -107,6 +123,122 @@ export function ruleFor(config, target) {
   return config.rules.find(rule => (
     rule.enabled && rule.provider === target.provider && rule.model === target.model
   ))
+}
+
+/**
+ * Price the tool-schema part of a request envelope the way the meter does.
+ *
+ * The meter compares a provider count against exactly this price before it
+ * reuses that count, so the guard reconstructs the same number when it turns
+ * the count into an observed ratio.
+ *
+ * @param header - canonical request envelope, or nothing.
+ * @returns heuristic tokens for its tool schemas; 0 when absent or unpriceable.
+ */
+export function estimateToolsTokens(header) {
+  const tools = header?.tools
+  if (!Array.isArray(tools) || tools.length === 0) return 0
+  let serialized
+  try {
+    serialized = JSON.stringify(tools)
+  } catch {
+    return 0
+  }
+  return Math.ceil(serialized.length / CHARS_PER_TOKEN) + BLOCK_OVERHEAD
+}
+
+/**
+ * Sum every provider-counted bucket the meter prices one prompt with.
+ * @param usage - provider usage record from a measurement baseline.
+ * @returns the summed tokens, or `undefined` when the record is unusable.
+ */
+export function usageTokens(usage) {
+  if (usage === null || typeof usage !== 'object') return undefined
+  let total = 0
+  for (const key of ['inputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'outputTokens']) {
+    const value = usage[key]
+    if (Number.isFinite(value)) total += value
+  }
+  return total
+}
+
+/**
+ * Learn how much larger the provider's own count is than the fixed heuristic.
+ *
+ * A `usage` baseline means the meter reused the last successful call's
+ * provider count for the committed history. `surfaceTokens - surfaceDeltaTokens`
+ * reconstructs the heuristic price of that same history, so the two are
+ * directly comparable: the quotient is the route's expansion factor, and it is
+ * available immediately instead of being inferred from a previous prediction.
+ *
+ * @param measurement - latest `tokenMeter.measure` result.
+ * @param header - the request envelope the measurement was priced against.
+ * @returns tokens-provider / tokens-heuristic, or `undefined` without usage.
+ */
+export function observedRatio(measurement, header) {
+  if (measurement?.baseline?.kind !== 'usage') return undefined
+  if (!Number.isFinite(measurement.surfaceTokens) || !Number.isFinite(measurement.surfaceDeltaTokens)) return undefined
+  const anchorSurface = Math.max(0, measurement.surfaceTokens - measurement.surfaceDeltaTokens)
+  const heuristic = estimateToolsTokens(header) + anchorSurface
+  const actual = usageTokens(measurement.baseline.usage)
+  if (actual === undefined || heuristic <= 0 || actual <= 0) return undefined
+  return actual / heuristic
+}
+
+/**
+ * Blend one observed ratio into the one used for pricing.
+ *
+ * An undercount is the dangerous direction, so a larger observation applies at
+ * once; a smaller one is released gradually, which keeps one noisy call from
+ * relaxing protection by a step. Neither direction leaves the bounds.
+ *
+ * @param ratio - ratio currently in force.
+ * @param sample - latest observation, or `undefined` when none is available.
+ * @returns the ratio to use for this step.
+ */
+export function blendRatio(ratio, sample) {
+  const current = Number.isFinite(ratio) && ratio > 0 ? ratio : CALIBRATION.min
+  if (!Number.isFinite(sample) || sample <= 0) return current
+  const next = sample > current
+    ? sample
+    : current * CALIBRATION.release + sample * (1 - CALIBRATION.release)
+  return Math.min(CALIBRATION.max, Math.max(CALIBRATION.min, next))
+}
+
+/**
+ * Price a measurement plus the messages a step will admit.
+ *
+ * The provider count is already in provider tokens, so only the
+ * heuristic-priced part — the surface delta since the anchored request and the
+ * admitted messages — is scaled. An estimate with no provider count behind it
+ * is wholly heuristic and is scaled as a whole.
+ *
+ * @param measurement - latest `tokenMeter.measure` result.
+ * @param pendingTokens - heuristic price of the admitted messages.
+ * @param ratio - calibration ratio for the route.
+ * @returns the projected prompt size in provider-scale tokens.
+ */
+export function calibratedPressure(measurement, pendingTokens, ratio) {
+  const scale = Number.isFinite(ratio) && ratio >= 1 ? ratio : 1
+  const delta = Number.isFinite(measurement.surfaceDeltaTokens) ? measurement.surfaceDeltaTokens : 0
+  const base = Math.max(0, measurement.totalTokens - delta)
+  const heuristic = Math.round((delta + Math.max(0, pendingTokens)) * scale)
+  return (measurement.baseline?.kind === 'usage' ? base : Math.round(base * scale)) + heuristic
+}
+
+/**
+ * Decide whether this step may spend a soft summary call.
+ *
+ * The attempt limit counts attempts that did not help; a fold that lowered the
+ * pressure re-arms it. Running out of budget never disables the hard line:
+ * that path has its own forced fold and refusal.
+ *
+ * @param options.attempts - attempts spent since the last successful fold.
+ * @param options.maxAttempts - configured attempt limit.
+ * @returns `attempt` or `exhausted`.
+ */
+export function attemptPolicy({ attempts, maxAttempts }) {
+  return attempts < maxAttempts ? 'attempt' : 'exhausted'
 }
 
 /**

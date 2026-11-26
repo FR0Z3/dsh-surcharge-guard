@@ -19,13 +19,13 @@ const useInstalled = Boolean(install) && (process.versions.electron !== undefine
  * `summarize()` runs and the recorded `llm.stream` options are the real
  * auxiliary request the guard produced.
  */
-async function run({ maxAttempts = 1, stubSummarizer = true } = {}) {
+async function run({ maxAttempts = 1, stubSummarizer = true, anchor } = {}) {
   const require = createRequire(`${install}/package.json`)
   const load = name => import(pathToFileURL(require.resolve(`@deepseek-ai/${name}`)))
   const { Context, Service } = await load('cordis')
   const { Session, SessionId } = await load('dsh-session')
   const { agentEvents } = await load('dsh-agent')
-  const { createUserMessage } = await load('dsh-llm')
+  const { createAssistantMessage, createUserMessage } = await load('dsh-llm')
   const { BasicCompactionEngine } = await load('dsh-compaction-basic')
   const { TokenMeter } = await load('dsh-token-meter')
   const ctx = new Context()
@@ -83,6 +83,27 @@ async function run({ maxAttempts = 1, stubSummarizer = true } = {}) {
   // Visible history, deliberately without a first `request/header`.
   session.append('user/message', user('history content '.repeat(2500)), { surfaceOp: 'append' })
   session.append('user/message', user('keep recent '.repeat(100)), { surfaceOp: 'append' })
+  if (anchor !== undefined) {
+    // One committed provider call: a request header, its usage, and the
+    // assistant reply it produced. This is what makes `measure()` reuse a
+    // provider count instead of repricing the whole history heuristically.
+    for (const text of anchor.history ?? []) session.append('user/message', user(text), { surfaceOp: 'append' })
+    session.append('request/header', {
+      header: { config: route, ...(anchor.tools === undefined ? {} : { tools: anchor.tools }) },
+    })
+    session.append('step/start', { turn: 1, step: 1 })
+    session.append('assistant/message', {
+      turn: 1,
+      step: 1,
+      message: createAssistantMessage({
+        content: [{ type: 'text', text: 'anchor reply' }],
+        source: { provider: route.provider, model: route.model },
+      }),
+      ...(anchor.usage === undefined ? {} : { usage: anchor.usage }),
+      stream: [{ type: 'text-chunks', index: 0, texts: ['anchor reply'] }],
+    }, { surfaceOp: 'append' })
+    session.append('step/end', { turn: 1, step: 1 })
+  }
   return { ctx, session, route, agent, signal, summaries, streams, resolutions, meter, user, engine, agentEvents }
 }
 
@@ -177,6 +198,8 @@ test('installed DSH: an unsupported effort skips the transaction and leaves no m
   const target = { provider: 'offline-summary', model: 'cheap', reasoningEffort: 'unsupported' }
   const fiber = ctx.plugin({ apply: guard.apply, Config: guard.Config, inject: guard.inject }, {
     rules: [{ ...route, surchargeAtTokens: 1000, summaryTarget: target }], safetyMarginTokens: 100, maxAttempts: 1,
+    // This test is about the effort pre-flight, not the hard line.
+    enforceLine: false,
   })
   try {
     await new Promise(resolve => setImmediate(resolve))
@@ -202,6 +225,128 @@ test('installed DSH: an unsupported effort skips the transaction and leaves no m
     ])
     assert.equal(streams.length, 0)
     assert.equal(session.snapshotEvents().some(event => event.type === 'compaction/start'), false)
+  } finally {
+    await fiber.dispose()
+  }
+})
+
+test('installed DSH: prices new content at the observed provider/heuristic ratio', { skip: !useInstalled }, async () => {
+  // Three long user messages after the committed call price at roughly 30K
+  // heuristic tokens; the provider counted 70,100 for the whole request, so
+  // this route's expansion factor is about 1.7.
+  const history = Array.from({ length: 3 }, () => 'history content '.repeat(2500))
+  const usage = { inputTokens: 70_000, outputTokens: 100, totalTokens: 70_100 }
+  const calibrated = await run({ anchor: { history, usage } })
+  const measurement = calibrated.meter.measure(calibrated.session, { config: calibrated.route })
+  assert.equal(measurement.baseline.kind, 'usage', 'the session must expose a provider count')
+  const heuristic = measurement.surfaceTokens - measurement.surfaceDeltaTokens
+  const ratio = 70_100 / heuristic
+  assert.ok(ratio > 1.5 && ratio < 2, `expected a real expansion factor, got ${ratio}`)
+
+  const fiber = calibrated.ctx.plugin({ apply: guard.apply, Config: guard.Config, inject: guard.inject }, {
+    rules: [{ ...calibrated.route, surchargeAtTokens: 100_000 }], safetyMarginTokens: 20_000, maxAttempts: 1,
+  })
+  try {
+    await new Promise(resolve => setImmediate(resolve))
+    const admitted = [calibrated.user('admitted history '.repeat(2000))]
+    await calibrated.agentEvents(calibrated.ctx, calibrated.agent).waterfall('agent/pre-step', {
+      turn: 1, step: 2, signal: calibrated.signal, modelSelection: calibrated.route, messages: admitted,
+    }, async () => ({ kind: 'enter', messages: admitted }))
+    assert.equal(calibrated.summaries.length, 1, 'the calibrated estimate crossed the 80K cap')
+  } finally {
+    await fiber.dispose()
+  }
+
+  // The same history without a provider count stays entirely heuristic: the
+  // 30K surface plus the same admitted message is well under the cap.
+  const estimated = await run({ anchor: { history } })
+  const plain = estimated.meter.measure(estimated.session, { config: estimated.route })
+  assert.equal(plain.baseline.kind, 'estimated')
+  const control = estimated.ctx.plugin({ apply: guard.apply, Config: guard.Config, inject: guard.inject }, {
+    rules: [{ ...estimated.route, surchargeAtTokens: 100_000 }], safetyMarginTokens: 20_000, maxAttempts: 1,
+  })
+  try {
+    await new Promise(resolve => setImmediate(resolve))
+    const admitted = [estimated.user('admitted history '.repeat(2000))]
+    await estimated.agentEvents(estimated.ctx, estimated.agent).waterfall('agent/pre-step', {
+      turn: 1, step: 2, signal: estimated.signal, modelSelection: estimated.route, messages: admitted,
+    }, async () => ({ kind: 'enter', messages: admitted }))
+    assert.equal(estimated.summaries.length, 0, 'an uncalibrated heuristic stays below the cap')
+  } finally {
+    await control.dispose()
+  }
+})
+
+test('installed DSH: the hard line rejects the step instead of dispatching', { skip: !useInstalled }, async () => {
+  const { ctx, route, agent, signal, streams, summaries, user, agentEvents } = await run()
+  // A summary route the pre-flight rejects leaves no way to lower the history,
+  // so the hard line must fail the step before any provider request is built.
+  const fiber = ctx.plugin({ apply: guard.apply, Config: guard.Config, inject: guard.inject }, {
+    rules: [{
+      ...route,
+      surchargeAtTokens: 1000,
+      summaryTarget: { provider: 'offline-summary', model: 'cheap', reasoningEffort: 'unsupported' },
+    }],
+    safetyMarginTokens: 100,
+    maxAttempts: 1,
+    enforceLine: true,
+  })
+  try {
+    await new Promise(resolve => setImmediate(resolve))
+    const admitted = [user('new step input')]
+    await assert.rejects(
+      agentEvents(ctx, agent).waterfall('agent/pre-step', {
+        turn: 1, step: 1, signal, modelSelection: route, messages: admitted,
+      }, async () => ({ kind: 'enter', messages: admitted })),
+      error => error.name === 'SurchargeLineError' && /blocked instead of sent/.test(error.message),
+    )
+    // No summary or main provider call was attempted.
+    assert.equal(summaries.length, 0)
+    assert.equal(streams.length, 0)
+  } finally {
+    await fiber.dispose()
+  }
+})
+
+test('installed DSH: the dispatch gate blocks an over-line request on the real waterfall', { skip: !useInstalled }, async () => {
+  const history = Array.from({ length: 3 }, () => 'history content '.repeat(2500))
+  const usage = { inputTokens: 70_000, outputTokens: 100, totalTokens: 70_100 }
+  const { ctx, session, route, agent, signal, streams, user, agentEvents } = await run({
+    anchor: { history, usage },
+  })
+  const fiber = ctx.plugin({ apply: guard.apply, Config: guard.Config, inject: guard.inject }, {
+    rules: [{ ...route, surchargeAtTokens: 100_000 }],
+    safetyMarginTokens: 20_000,
+    maxAttempts: 1,
+    enforceLine: true,
+  })
+  try {
+    await new Promise(resolve => setImmediate(resolve))
+    // A step below the trigger still learns the route's provider/heuristic
+    // ratio before the boundary is ever consulted.
+    const admitted = [user('tiny step input')]
+    await agentEvents(ctx, agent).waterfall('agent/pre-step', {
+      turn: 1, step: 2, signal, modelSelection: route, messages: admitted,
+    }, async () => ({ kind: 'enter', messages: admitted }))
+    const huge = user('x'.repeat(300_000))
+    const request = {
+      provider: route.provider,
+      model: route.model,
+      sessionId: session.id,
+      messages: [huge],
+    }
+    // The offline harness overrides `stream` itself, so dispatch through the
+    // real waterfall the llm runtime uses.
+    assert.throws(
+      () => ctx.waterfall(ctx.get('llm'), 'llm/stream', request, () => 'stream'),
+      error => error.name === 'SurchargeLineError' && /blocked before dispatch/.test(error.message),
+    )
+    // A request below the line still reaches the next listener.
+    assert.equal(ctx.waterfall(ctx.get('llm'), 'llm/stream', {
+      ...request, messages: [user('small request')],
+    }, () => 'stream'), 'stream')
+    // The adapter never saw the over-line request.
+    assert.equal(streams.length, 0)
   } finally {
     await fiber.dispose()
   }
