@@ -1,6 +1,16 @@
 # Changelog
 
 ## Unreleased
+- Move the sources to TypeScript. `src/logic.ts`, `src/index.ts` and `src/client.ts` are the
+  sources of truth; `logic.js`, `index.js` and `client.js` stay committed runtime artifacts that
+  the package `exports` point at, so a checkout still runs without a build step. `tsc --noEmit`
+  is the type gate and sucrase emits by erasing type syntax only, which keeps the hand-written
+  formatting and comments: the emitted `logic.js` and `index.js` are byte-identical to their
+  previously committed versions, and `client.js` differs only by parentheses around three
+  annotated callback parameters. Ambient runtime shapes live in `src/types.d.ts`, which never
+  emits. `pnpm check` now type-gates, rebuilds, syntax-checks, and runs the locale check and
+  tests; `pnpm build` rebuilds the artifacts.
+
 - Enforce the surcharge line as a hard boundary. A fold cannot always lower the pressure (a
   failing summary, no safe range, a huge retained head), and the guard used to warn and send the
   request anyway, paying the higher rate. It now follows native context-overflow recovery: prune

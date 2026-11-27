@@ -52,12 +52,16 @@ If the route cannot serve the chosen level at run time, the guard logs a warning
 
 ## Development
 
+Sources live in `src/*.ts`; the compiled `index.js`, `logic.js` and `client.js` are committed and stay what the package `exports` point at, so a checkout runs as-is:
+
 ```sh
 pnpm install
-pnpm check
+pnpm check      # tsc type gate → sucrase rebuild → syntax checks → locale consistency → tests
+pnpm build      # rebuild the compiled artifacts only
+pnpm typecheck  # type gate only
 ```
 
-Tests cover host decisions, range selection, and rendering from the registered settings entry. An installed DSH can also exercise the real compaction transaction with an offline summarizer. Run this from the DSH Desktop terminal:
+The artifacts are produced by erasing type syntax only, which keeps the sources' formatting and comments; after editing `src/*.ts`, rebuild, and `git diff` shows exactly the changes beyond the added annotations. Tests cover host decisions, range selection, and rendering from the registered settings entry. An installed DSH can also exercise the real compaction transaction with an offline summarizer. Run this from the DSH Desktop terminal:
 
 ```sh
 ELECTRON_RUN_AS_NODE=1 "$DSH_NODE_EXECUTABLE" --test tests/installed-host.test.mjs
