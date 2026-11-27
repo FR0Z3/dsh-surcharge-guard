@@ -6,8 +6,12 @@
  * `tokenMeter` service, the session surface, the compaction and pruning
  * services, the `llm` service, and the `agent/pre-step` / `llm/stream` event
  * payloads. Members are narrowed to the fields the guard reads or passes
- * through; a later framework rename of any field named here fails the type gate
- * instead of letting the guard quietly misread a payload.
+ * through. The type gate checks only how the plugin uses these local
+ * declarations; it never compares them with the running Host. Types imported
+ * from a DSH package would take part in the check, but no such import keeps
+ * these declarations in sync with the Host either. Host compatibility itself
+ * is what upstream type definitions would cover where they exist, and what
+ * the installed-DSH integration tests cover here.
  *
  * This file is a declaration module: it is never imported by name and never
  * compiles to a runtime artifact, so the runtime sources erase to themselves.
@@ -153,7 +157,13 @@ interface CompactionService {
 
 /** The tool-result pruner the hard line runs before a forced fold. */
 interface PrunerService {
-  /** Pruning reads only; the result reflects what the session already holds. */
+  /**
+   * Prune every over-budget tool result on the current surface: each one
+   * appends a `compaction/prune` journal event and a replacement
+   * `tool/result`, and the surface swap commits per node. A throw partway
+   * through the pass leaves the replacements already committed durable, so a
+   * caller must not read an exception as "the session is unchanged".
+   */
   pruneSession(session: unknown): { pruned: unknown[]; charsRemoved: number }
 }
 
@@ -228,9 +238,11 @@ interface PreStepEvent {
 }
 
 /** What downstream `agent/pre-step` middleware decided for this step. */
-interface StepDecision {
-  kind: 'enter' | 'reject'
+type StepDecision = { kind: 'reject' } | {
+  kind: 'enter'
   messages: ChatMessage[]
+  /** Start a distinct model-message series before this step's admitted messages. */
+  startsRequestSeries?: true
 }
 
 /** The `llm/stream` request the dispatch gate prices at the boundary. */
