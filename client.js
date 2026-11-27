@@ -186,7 +186,7 @@ window.__ModuleLoader__.load({
     }
 
     function useStore(store) {
-      const subscribe = React.useCallback(listener => store === undefined ? NO_SUBSCRIBE() : store.subscribe(listener), [store])
+      const subscribe = React.useCallback((listener) => store === undefined ? NO_SUBSCRIBE() : store.subscribe(listener), [store])
       const snapshot = React.useCallback(() => store?.getSnapshot() ?? EMPTY_SNAPSHOT, [store])
       return React.useSyncExternalStore(subscribe, snapshot)
     }
@@ -395,7 +395,7 @@ window.__ModuleLoader__.load({
           value,
           disabled,
           style: { ...styles.field, minWidth: 0, width: '100%', maxWidth: '100%' },
-          onChange: event => onChange(event.target.value),
+          onChange: (event) => onChange(event.target.value),
         },
         h('option', { value: '' }, t('summaryEffortDefault')),
         known ? null : h('option', { value }, `${value} (${t('summaryUnconfirmed')})`),
@@ -431,7 +431,7 @@ window.__ModuleLoader__.load({
           value,
           disabled,
           style: { ...styles.field, minWidth: 0, width: '100%', maxWidth: '100%' },
-          onChange: event => onChange(event.target.value),
+          onChange: (event) => onChange(event.target.value),
         },
         h('option', { value: '' }, t('summaryDefault')),
         known ? null : h('option', { value }, `${target.model} · ${target.provider} (${t('summaryUnconfirmed')})`),

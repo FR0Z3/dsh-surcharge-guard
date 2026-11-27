@@ -287,3 +287,145 @@ interface ClientSlotOptions {
   key: string
   locale: string
 }
+
+/** Form state a settings page reads and writes through `mutate`. */
+interface FormSnapshot {
+  status: 'loading' | 'ready' | 'unavailable'
+  writable?: boolean
+  revision?: number
+  value?: { providers?: { [provider: string]: { models?: Array<{ id: unknown, contextWindow?: number }> } | undefined } } & ClientConfigDocument
+  [key: string]: unknown
+}
+
+/** A config form store: subscribable snapshot plus revisioned writes. */
+interface FormStore {
+  getSnapshot(): FormSnapshot
+  subscribe(listener: () => void): () => void
+  mutate(ops: Array<{ op: string, path: (string | number)[], value: unknown }>, revision?: number): Promise<boolean>
+}
+
+/** The saved plugin document the settings page edits. */
+interface ClientConfigDocument {
+  enabled?: boolean
+  enforceLine?: boolean
+  safetyMarginTokens?: number
+  retainRatio?: number
+  maxAttempts?: number
+  rules?: ClientRule[]
+  [key: string]: unknown
+}
+
+/** One rule as the settings page reads and writes it. */
+interface ClientRule {
+  provider: string
+  model: string
+  surchargeAtTokens: number
+  enabled?: boolean
+  summaryTarget?: SummaryTarget | null
+  [key: string]: unknown
+}
+
+/** One model row the catalog and the provider declarations merge into. */
+interface CatalogRow {
+  provider: string
+  model: string
+  contextWindow?: number
+  dormant?: boolean
+  described?: boolean
+  efforts?: ReasoningEffort[]
+  [key: string]: unknown
+}
+
+/** One reasoning level a live catalog advertises for a summary route. */
+interface ReasoningEffort {
+  id: string
+  name?: string
+  description?: string
+  [key: string]: unknown
+}
+
+/** Catalog scan state the settings page renders. */
+interface CatalogState {
+  status: 'loading' | 'ready'
+  unavailable?: boolean
+  failed?: boolean
+  reason?: string
+  /** Always an array: the initial state seeds both, and a reload keeps the last values. */
+  groups: Array<{ id: string, models?: Array<{ id: string, reasoning?: { efforts?: ReasoningEffort[] } }> }>
+  failures: Array<{ id?: string, name?: string, message?: string }>
+}
+
+/** What `loadCatalog` returns before the caller stamps its status on it. */
+type CatalogResult = Omit<CatalogState, 'status'> & {
+  unavailable?: boolean
+  failed?: boolean
+  reason?: string
+  groups: CatalogState['groups']
+  failures: CatalogState['failures']
+}
+
+/** A live `remote.modelCatalog()` answer. */
+interface CatalogAnswer {
+  ok?: boolean
+  error?: { message?: string }
+  value?: { groups?: CatalogState['groups'], failures?: CatalogState['failures'] }
+}
+
+/** A remote session service exposing the model catalog. */
+interface RemoteSession {
+  modelCatalog(): Promise<CatalogAnswer>
+}
+
+/** Save feedback the settings page surfaces after one write. */
+type WriteStatus = null | 'saving' | 'thresholdSaved'
+
+/** Props the panel passes its labeled field row. */
+interface RowProps {
+  label: string
+  hint: string | undefined
+  children?: React.ReactNode
+}
+
+/** Props the panel passes its host-like switch. */
+interface ToggleProps {
+  checked: boolean
+  onChange: (next: boolean) => void
+  disabled: boolean | undefined
+  label: string
+}
+
+/** Props the panel passes its commit-on-blur numeric field. */
+interface NumericInputProps {
+  label: string
+  value: number
+  onCommit: (next: number) => unknown
+  disabled: boolean | undefined
+  parse?: (text: string) => number | undefined
+  format?: (value: number) => string
+  invalid: () => void
+}
+
+/** Props for the per-rule summary effort picker. */
+interface SummaryEffortSelectProps {
+  t: (key: string) => string
+  rule: ClientRule
+  rows: Map<string, CatalogRow>
+  disabled: boolean | undefined
+  onChange: (effort: string) => void
+}
+
+/** Props for the per-rule summary model picker. */
+interface SummaryModelSelectProps {
+  t: (key: string) => string
+  rule: ClientRule
+  candidates: CatalogRow[]
+  disabled: boolean | undefined
+  onChange: (selection: string) => void
+}
+
+/** Props for the whole settings panel. */
+interface PanelProps {
+  t: (key: string) => string
+  ctx: ClientContext
+  form: { state: FormSnapshot, mutate: FormStore['mutate'] } | undefined
+}
