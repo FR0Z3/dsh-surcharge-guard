@@ -47,16 +47,6 @@ interface GuardConfig {
   enforceLine: boolean
 }
 
-/** Raw config document as the Loader row or the settings page provides it. */
-interface RawConfig {
-  enabled?: ConfigField<boolean>
-  rules?: ConfigField<unknown[]>
-  safetyMarginTokens?: ConfigField<unknown>
-  retainRatio?: ConfigField<unknown>
-  maxAttempts?: ConfigField<unknown>
-  enforceLine?: ConfigField<boolean>
-}
-
 /** One priced surface node, as `tokenMeter.measure()` reports. */
 interface PricedNode {
   seq: number
@@ -176,7 +166,8 @@ interface LlmService {
 
 /** What the `agentPresets` service answers `serviceFor` with. */
 interface AgentPresets {
-  serviceFor(owner: unknown, name: string): any
+  /** Resolve one preset-owned service; undefined when the preset does not own it. */
+  serviceFor<T = any>(owner: unknown, name: string): T | undefined
 }
 
 /** Result of `foldFloor(cap)`; both fields optional for a floor-less call. */

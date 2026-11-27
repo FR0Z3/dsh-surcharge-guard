@@ -7,7 +7,7 @@ import {
 
 function compactionFor(ctx: Context, agent: unknown): CompactionService | undefined {
   // Web presets own an isolated backend; a standalone profile may own it at root.
-  return ctx.get('agentPresets')?.serviceFor(agent, 'compaction') ?? ctx.get<CompactionService>('compaction')
+  return ctx.get<AgentPresets>('agentPresets')?.serviceFor<CompactionService>(agent, 'compaction') ?? ctx.get<CompactionService>('compaction')
 }
 
 function prunerFor(ctx: Context, agent: unknown): PrunerService | undefined {
@@ -15,7 +15,7 @@ function prunerFor(ctx: Context, agent: unknown): PrunerService | undefined {
   // context cannot see it; resolve it through the preset first, then at root.
   // A preset without that service must not break the hard line.
   try {
-    return ctx.get('agentPresets')?.serviceFor(agent, 'toolResultPruner') ?? ctx.get('toolResultPruner')
+    return ctx.get<AgentPresets>('agentPresets')?.serviceFor<PrunerService>(agent, 'toolResultPruner') ?? ctx.get<PrunerService>('toolResultPruner')
   } catch {
     return undefined
   }
@@ -132,7 +132,7 @@ async function compactWithSummaryTarget(ctx: Context, backend: CompactionService
       try {
         const active = await fiber
         signal.throwIfAborted()
-        const engine = active.ctx.get('compaction')
+        const engine = active.ctx.get<CompactionService>('compaction')
         if (engine === undefined) throw new Error('the isolated compaction backend did not start')
         return await engine.compactRegion(range.start, range.end, agent, signal)
       } finally {
@@ -456,7 +456,7 @@ export function apply(ctx: Context, rawConfig: any) {
   const calibrations = new WeakMap()
   const dispatchRatios = new Map()
 
-  ctx.on('agent/pre-step', async (event, next) => {
+  ctx.on('agent/pre-step', async (event: PreStepEvent, next: () => Promise<StepDecision>) => {
     // Let native compaction and other downstream middleware run first, then
     // price the messages the step will admit (not just the original inbox).
     // Their surface replacement is recorded so this step is not compacted twice.
@@ -488,7 +488,7 @@ export function apply(ctx: Context, rawConfig: any) {
    * compaction summary is exempt: it is the recovery mechanism, and its own
    * route may be a different, unguarded model.
    */
-  ctx.on('llm/stream', (options, next) => {
+  ctx.on('llm/stream', (options: StreamRequest, next: () => unknown) => {
     const config = normalizeConfig(rawConfig)
     if (!config.enabled || config.maxAttempts === 0 || !config.enforceLine) return next()
     if (options.purpose !== undefined || options.sessionId === undefined) return next()
