@@ -104,7 +104,7 @@ async function run({ maxAttempts = 1, stubSummarizer = true, anchor } = {}) {
     }, { surfaceOp: 'append' })
     session.append('step/end', { turn: 1, step: 1 })
   }
-  return { ctx, session, route, agent, signal, summaries, streams, resolutions, meter, user, engine, agentEvents }
+  return { ctx, session, route, agent, signal, summaries, streams, resolutions, meter, user, agentEvents }
 }
 
 test('installed DSH: real waterfall, token meter and summary transaction', { skip: !useInstalled }, async () => {
