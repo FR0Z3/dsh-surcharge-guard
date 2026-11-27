@@ -53,8 +53,8 @@ interface GuardConfig {
 
 /** One priced surface node, as `tokenMeter.measure()` reports. */
 interface PricedNode {
-  seq: number
-  tokens: number
+  readonly seq: number
+  readonly tokens: number
 }
 
 /**
@@ -64,17 +64,17 @@ interface PricedNode {
  * `Record<string, unknown>` through TS's implicit index signature.
  */
 type UsageRecord = {
-  inputTokens?: number
-  cacheReadTokens?: number
-  cacheWriteTokens?: number
-  outputTokens?: number
+  readonly inputTokens?: number
+  readonly cacheReadTokens?: number
+  readonly cacheWriteTokens?: number
+  readonly outputTokens?: number
 }
 
 /** What `tokenMeter.measure()` learned the committed history costs. */
 interface Baseline {
-  kind: 'usage' | 'estimated' | 'none'
-  tokens?: number
-  usage?: UsageRecord
+  readonly kind: 'usage' | 'estimated' | 'none'
+  readonly tokens?: number
+  readonly usage?: UsageRecord
 }
 
 /**
@@ -85,11 +85,11 @@ interface Baseline {
  * the raw config path (`logic.ts`) also runs in a plain Node test fixture.
  */
 interface Measurement {
-  baseline: Baseline
-  surfaceTokens: number
-  surfaceDeltaTokens: number
-  totalTokens: number
-  nodes: PricedNode[]
+  readonly baseline: Baseline
+  readonly surfaceTokens: number
+  readonly surfaceDeltaTokens: number
+  readonly totalTokens: number
+  readonly nodes: readonly PricedNode[]
 }
 
 /** Request envelope: routed config plus the tools the request carries. */
@@ -327,6 +327,14 @@ interface ClientRule {
   summaryTarget?: SummaryTarget | null
   [key: string]: unknown
 }
+
+/** Top-level config fields the settings page writes through `mutate`. */
+type WritableField = 'enabled' | 'enforceLine' | 'safetyMarginTokens' | 'retainRatio' | 'maxAttempts' | 'rules'
+
+/** The value shape one writable field takes, so a write cannot mismatch its field. */
+type WritableValue<F> = F extends 'enabled' | 'enforceLine' ? boolean
+  : F extends 'rules' ? ClientRule[]
+  : number
 
 /** One model row the catalog and the provider declarations merge into. */
 interface CatalogRow {

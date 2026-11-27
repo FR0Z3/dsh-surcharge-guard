@@ -249,7 +249,7 @@ export function attemptPolicy({ attempts, maxAttempts }: { attempts: number, max
  * @returns `cuts[i]` for the cut before `nodes[i]`, plus the trailing cut; or
  *   `undefined` when the surface is internally inconsistent.
  */
-export function balanceCuts(session: SessionLike, nodes: PricedNode[]): boolean[] | undefined {
+export function balanceCuts(session: SessionLike, nodes: readonly PricedNode[]): boolean[] | undefined {
   const cuts = [true]
   let open = 0
   for (const node of nodes) {
@@ -338,7 +338,7 @@ export function foldFloor(cap: number): FoldFloorResult {
  * @param [floor] - `foldFloor(cap)` result; omitted means no minimum reclaim.
  * @returns the inclusive span, or `undefined` when nothing is worth compacting.
  */
-export function selectRange(session: SessionLike, nodes: PricedNode[], retainTokens: number, floor: FoldFloorResult = {}): { start: number, end: number } | undefined {
+export function selectRange(session: SessionLike, nodes: readonly PricedNode[], retainTokens: number, floor: FoldFloorResult = {}): { start: number, end: number } | undefined {
   const surface = session.surface.nodes
   if (nodes.length === 0 || nodes.length !== surface.length
     || nodes.some((node, index) => node.seq !== surface[index])) return undefined

@@ -551,7 +551,7 @@ window.__ModuleLoader__.load({
       if (snapshot.status === 'loading') return h('p', { style: styles.intro }, t('loading'))
       if (snapshot.status !== 'ready') return h('p', { style: styles.error }, t('notWritable'))
 
-      async function write(field: string, value: unknown, successStatus: WriteStatus = null) {
+      async function write<F extends WritableField>(field: F, value: WritableValue<F>, successStatus: WriteStatus = null) {
         const target = form ?? store
         if (!writable || writeInFlight.current) return false
         writeInFlight.current = true
@@ -622,7 +622,7 @@ window.__ModuleLoader__.load({
         const { reasoningEffort: _, ...target } = rule.summaryTarget
         return { ...rule, summaryTarget: reasoningEffort === '' ? target : { ...target, reasoningEffort } }
       }))
-      const scalarRow = (label: string, hint: string, value: number, field: string, parse?: (text: string) => number | undefined, format?: (value: number) => string) => h(Row, { label: t(label), hint: t(hint) },
+      const scalarRow = (label: string, hint: string, value: number, field: 'safetyMarginTokens' | 'retainRatio' | 'maxAttempts', parse?: (text: string) => number | undefined, format?: (value: number) => string) => h(Row, { label: t(label), hint: t(hint) },
         h(NumericInput, { label: t(label), disabled, value, parse, format, invalid, onCommit: next => write(field, next) }),
       )
       const providerFailures = catalog.failures.map(failure => `${failure.name ?? failure.id}: ${failure.message}`).join('; ')
