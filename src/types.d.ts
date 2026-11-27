@@ -146,15 +146,25 @@ interface SessionEvent {
 }
 
 /** The compaction service both the session and an isolated engine share. */
+/** Config shape of a Basic-style compaction backend the guard inspects. */
+interface BasicBackendConfig {
+  summarizationProvider?: string
+  summarizationModel?: string
+  maxTokens?: number
+  modelPolicies?: Array<{ provider: string, model: string, maxTokens?: number }>
+  [key: string]: unknown
+}
+
 interface CompactionService {
-  compactRegion(start: number, end: number, owner: unknown, signal: AbortSignal): Promise<{ shadowedSeqs: number[] }>
-  config?: Record<string, unknown>
+  compactRegion(start: number, end: number, owner: unknown, signal: AbortSignal): Promise<CompactionResult>
+  config?: BasicBackendConfig
   constructor?: new (...args: any[]) => unknown
 }
 
 /** The tool-result pruner the hard line runs before a forced fold. */
 interface PrunerService {
-  pruneSession(session: unknown): Promise<{ pruned: unknown[]; charsRemoved: number }>
+  /** Pruning reads only; the result reflects what the session already holds. */
+  pruneSession(session: unknown): { pruned: unknown[]; charsRemoved: number }
 }
 
 /** `llm` service, narrowed to the calls the summary effort path makes. */
@@ -166,27 +176,46 @@ interface LlmService {
 
 /** What the `agentPresets` service answers `serviceFor` with. */
 interface AgentPresets {
-  serviceFor(owner: unknown, name: string): unknown
+  serviceFor(owner: unknown, name: string): any
 }
 
 /** Result of `foldFloor(cap)`; both fields optional for a floor-less call. */
 type FoldFloorResult = { summaryTokens?: number, minReclaimTokens?: number }
 
+/** Attempt state for one turn of one session, route included. */
+interface AttemptBudget {
+  turn: number
+  provider: string
+  model: string
+  attempts: number
+  reported: Set<string>
+}
+
+/** What one committed `compactRegion` transaction produced. */
+interface CompactionResult {
+  shadowedSeqs: number[]
+}
+
 /** A fiber-like plugin handle the guard disposes after one transaction. */
-interface Fiber {
+interface Fiber extends Promise<{ ctx: { get<T = any>(name: string): T | undefined } }> {
   dispose(): Promise<void>
 }
 
 /** A realm the guard isolates services and mounts a backend in. */
 interface Realm {
   isolate(name: 'llm'): Realm
-  provide(name: 'llm', value: unknown): Promise<() => void> | (() => void)
+  provide(name: 'llm', value: unknown): () => void
   plugin(Engine: unknown, settings: Record<string, unknown>): Fiber
 }
 
 /** Cordis context the Host guard runs on, narrowed to what it touches. */
 interface Context {
-  get(name: string): unknown
+  /**
+   * Resolve a service by name. The caller picks the expected type through the
+   * type argument; `undefined` is returned when the service is absent, and an
+   * absent service of the wrong shape is a runtime, not a type, question.
+   */
+  get<T = any>(name: string): T | undefined
   isolate(name: 'compaction'): Realm
   on(name: string, handler: (...args: any[]) => unknown, opts?: Record<string, unknown>): void
   tokenMeter: TokenMeterService
