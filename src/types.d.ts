@@ -1,0 +1,442 @@
+/**
+ * Ambient declarations for the runtime shapes this guard touches.
+ *
+ * The framework's own packages ship as JavaScript without declarations, so this
+ * file declares the parts of the DSH Host the guard actually observes: the
+ * `tokenMeter` service, the session surface, the compaction and pruning
+ * services, the `llm` service, and the `agent/pre-step` / `llm/stream` event
+ * payloads. Members are narrowed to the fields the guard reads or passes
+ * through. The type gate checks only how the plugin uses these local
+ * declarations; it never compares them with the running Host. Types imported
+ * from a DSH package would take part in the check, but no such import keeps
+ * these declarations in sync with the Host either. Host compatibility itself
+ * is what upstream type definitions would cover where they exist, and what
+ * the installed-DSH integration tests cover here.
+ *
+ * This file is a declaration module: it is never imported by name and never
+ * compiles to a runtime artifact, so the runtime sources erase to themselves.
+ */
+
+/** Values DSH hands over as live (volatile) config references. */
+type ConfigField<T> = (T & { get?: undefined }) | { get(): T }
+
+/** A routed provider and model, as DSH names them in config and headers. */
+interface Route {
+  provider: string
+  model: string
+}
+
+/** Summary route one rule may pin, with an optional reasoning effort. */
+interface SummaryTarget extends Route {
+  /** Effort id the route must serve; absent means the route's own default. */
+  reasoningEffort?: string
+}
+
+/** One normalized guard rule; a missing `summaryTarget` means the session route. */
+interface Rule {
+  provider: string
+  model: string
+  surchargeAtTokens: number
+  enabled: boolean
+  summaryTarget?: SummaryTarget
+}
+
+/** Normalized guard configuration; every field volatile between steps. */
+interface GuardConfig {
+  enabled: boolean
+  rules: Rule[]
+  safetyMarginTokens: number
+  retainRatio: number
+  maxAttempts: number
+  enforceLine: boolean
+}
+
+/** One priced surface node, as `tokenMeter.measure()` reports. */
+interface PricedNode {
+  readonly seq: number
+  readonly tokens: number
+}
+
+/**
+ * Provider usage record a measurement baseline may carry.
+ *
+ * A type alias, not an interface, so a concrete record stays assignable to
+ * `Record<string, unknown>` through TS's implicit index signature.
+ */
+type UsageRecord = {
+  readonly inputTokens?: number
+  readonly cacheReadTokens?: number
+  readonly cacheWriteTokens?: number
+  readonly outputTokens?: number
+}
+
+/** What `tokenMeter.measure()` learned the committed history costs. */
+interface Baseline {
+  readonly kind: 'usage' | 'estimated' | 'none'
+  readonly tokens?: number
+  readonly usage?: UsageRecord
+}
+
+/**
+ * Result of `tokenMeter.measure(session, header)`.
+ *
+ * `totalTokens`, `surfaceTokens` and `surfaceDeltaTokens` are always present
+ * in the service's return; the guard still narrows before using them, because
+ * the raw config path (`logic.ts`) also runs in a plain Node test fixture.
+ */
+interface Measurement {
+  readonly baseline: Baseline
+  readonly surfaceTokens: number
+  readonly surfaceDeltaTokens: number
+  readonly totalTokens: number
+  readonly nodes: readonly PricedNode[]
+}
+
+/** Request envelope: routed config plus the tools the request carries. */
+interface RequestHeader {
+  config: Route & {
+    reasoningEffort?: string
+    [key: string]: unknown
+  }
+  adapterDefaults?: Record<string, unknown>
+  tools?: unknown[]
+}
+
+/** Anything carrying a tool-schema list the meter prices. */
+interface ToolEnvelope {
+  tools?: unknown[]
+}
+
+/** The session surface: node seqs in model-visible order, plus fold metadata. */
+interface Surface {
+  nodes: number[]
+  replaceGeneration?: number
+}
+
+/** A message the guard prices, or passes through to a request. */
+interface ChatMessage {
+  role: string
+  [key: string]: unknown
+}
+
+/** Session surface the guard reads: event lookup and the retained nodes. */
+interface SessionLike {
+  id: unknown
+  surface: Surface
+  eventAt(seq: number): SessionEvent | undefined
+  requestHeader(): RequestHeader | undefined
+}
+
+/** Journal event, narrowed to the kinds the guard inspects. */
+interface SessionEvent {
+  seq: number
+  type: string
+  data?: {
+    /** Assistant content blocks the guard counts tool calls in. */
+    message?: { content?: Array<{ type?: unknown }> }
+    source?: { kind?: string }
+    [key: string]: unknown
+  }
+}
+
+/** The compaction service both the session and an isolated engine share. */
+/** Config shape of a Basic-style compaction backend the guard inspects. */
+interface BasicBackendConfig {
+  summarizationProvider?: string
+  summarizationModel?: string
+  maxTokens?: number
+  modelPolicies?: Array<{ provider: string, model: string, maxTokens?: number }>
+  [key: string]: unknown
+}
+
+interface CompactionService {
+  compactRegion(start: number, end: number, owner: unknown, signal: AbortSignal): Promise<CompactionResult>
+  config?: BasicBackendConfig
+  constructor?: new (...args: any[]) => unknown
+}
+
+/** The tool-result pruner the hard line runs before a forced fold. */
+interface PrunerService {
+  /**
+   * Prune every over-budget tool result on the current surface: each one
+   * appends a `compaction/prune` journal event and a replacement
+   * `tool/result`, and the surface swap commits per node. A throw partway
+   * through the pass leaves the replacements already committed durable, so a
+   * caller must not read an exception as "the session is unchanged".
+   */
+  pruneSession(session: unknown): { pruned: unknown[]; charsRemoved: number }
+}
+
+/** `llm` service, narrowed to the calls the summary effort path makes. */
+interface LlmService {
+  resolveCallConfig(config: Route & { reasoningEffort?: string }, signal?: AbortSignal): Promise<unknown>
+  stream(options: any): AsyncIterable<unknown>
+  [key: string]: any
+}
+
+/** What the `agentPresets` service answers `serviceFor` with. */
+interface AgentPresets {
+  /** Resolve one preset-owned service; undefined when the preset does not own it. */
+  serviceFor<T = any>(owner: unknown, name: string): T | undefined
+}
+
+/** Result of `foldFloor(cap)`; both fields optional for a floor-less call. */
+type FoldFloorResult = { summaryTokens?: number, minReclaimTokens?: number }
+
+/** Attempt state for one turn of one session, route included. */
+interface AttemptBudget {
+  turn: number
+  provider: string
+  model: string
+  attempts: number
+  reported: Set<string>
+}
+
+/** What one committed `compactRegion` transaction produced. */
+interface CompactionResult {
+  shadowedSeqs: number[]
+}
+
+/** A fiber-like plugin handle the guard disposes after one transaction. */
+interface Fiber extends Promise<{ ctx: { get<T = any>(name: string): T | undefined } }> {
+  dispose(): Promise<void>
+}
+
+/** A realm the guard isolates services and mounts a backend in. */
+interface Realm {
+  isolate(name: 'llm'): Realm
+  provide(name: 'llm', value: unknown): () => void
+  plugin(Engine: unknown, settings: Record<string, unknown>): Fiber
+}
+
+/** Cordis context the Host guard runs on, narrowed to what it touches. */
+interface Context {
+  /**
+   * Resolve a service by name. The caller picks the expected type through the
+   * type argument; `undefined` is returned when the service is absent, and an
+   * absent service of the wrong shape is a runtime, not a type, question.
+   */
+  get<T = any>(name: string): T | undefined
+  isolate(name: 'compaction'): Realm
+  on(name: string, handler: (...args: any[]) => unknown, opts?: Record<string, unknown>): void
+  tokenMeter: TokenMeterService
+  logger: { info(message: string): void; warn(message: string): void }
+}
+
+/** The `tokenMeter` service, narrowed to the calls the guard makes. */
+interface TokenMeterService {
+  measure(session: unknown, header?: RequestHeader): Measurement
+  estimateMessage(message: ChatMessage): number
+}
+
+/** The `agent/pre-step` event the guard guards one step with. */
+interface PreStepEvent {
+  agent: { session: SessionLike; model?: { current(): Route | undefined } }
+  signal: AbortSignal
+  turn: number
+  modelSelection?: Route & { reasoningEffort?: string }
+}
+
+/** What downstream `agent/pre-step` middleware decided for this step. */
+type StepDecision = { kind: 'reject' } | {
+  kind: 'enter'
+  messages: ChatMessage[]
+  /** Start a distinct model-message series before this step's admitted messages. */
+  startsRequestSeries?: true
+}
+
+/** The `llm/stream` request the dispatch gate prices at the boundary. */
+interface StreamRequest extends Route {
+  sessionId?: unknown
+  purpose?: string
+  messages?: ChatMessage[]
+  tools?: unknown[]
+}
+
+interface NumberConstructor {
+  isFinite(value: unknown): value is number
+}
+
+/** Client side: browser runtime this bundle's Client entry registers into. */
+interface Window {
+  __ModuleLoader__: {
+    load(module: { id: string, factory: (require: (id: string) => unknown) => ClientModule }): void
+  }
+}
+
+/** What a Client factory returns: the shape Cordis-Web loads as a plugin. */
+interface ClientModule {
+  inject?: string[]
+  apply(ctx: ClientContext): unknown
+}
+
+/** Client context: slots and locale services, plus optional services. */
+interface ClientContext {
+  effect(run: () => unknown, label?: string): unknown
+  locale: {
+    register(namespace: string, dictionaries: Record<string, Record<string, string>>): unknown
+    bind(namespace: string): (key: string) => string
+  }
+  slots: {
+    inject(slot: string, run: (register: (options: ClientSlotOptions, renderer: (props: any) => unknown) => unknown) => void): void
+    register(options: ClientSlotOptions, renderer: (props: any) => unknown): unknown
+  }
+  get(key: string): any
+}
+
+/** Client slot registration options the bundle passes. */
+interface ClientSlotOptions {
+  name: string
+  key: string
+  locale: string
+}
+
+/** Form state a settings page reads and writes through `mutate`. */
+interface FormSnapshot {
+  status: 'loading' | 'ready' | 'unavailable'
+  writable?: boolean
+  revision?: number
+  value?: { providers?: { [provider: string]: { models?: Array<{ id: unknown, contextWindow?: number }> } | undefined } } & ClientConfigDocument
+  [key: string]: unknown
+}
+
+/** A config form store: subscribable snapshot plus revisioned writes. */
+interface FormStore {
+  getSnapshot(): FormSnapshot
+  subscribe(listener: () => void): () => void
+  mutate(ops: Array<{ op: string, path: (string | number)[], value: unknown }>, revision?: number): Promise<boolean>
+}
+
+/** The saved plugin document the settings page edits. */
+interface ClientConfigDocument {
+  enabled?: boolean
+  enforceLine?: boolean
+  safetyMarginTokens?: number
+  retainRatio?: number
+  maxAttempts?: number
+  rules?: ClientRule[]
+  [key: string]: unknown
+}
+
+/** One rule as the settings page reads and writes it. */
+interface ClientRule {
+  provider: string
+  model: string
+  surchargeAtTokens: number
+  enabled?: boolean
+  summaryTarget?: SummaryTarget | null
+  [key: string]: unknown
+}
+
+/** Top-level config fields the settings page writes through `mutate`. */
+type WritableField = 'enabled' | 'enforceLine' | 'safetyMarginTokens' | 'retainRatio' | 'maxAttempts' | 'rules'
+
+/** The value shape one writable field takes, so a write cannot mismatch its field. */
+type WritableValue<F> = F extends 'enabled' | 'enforceLine' ? boolean
+  : F extends 'rules' ? ClientRule[]
+  : number
+
+/** One model row the catalog and the provider declarations merge into. */
+interface CatalogRow {
+  provider: string
+  model: string
+  contextWindow?: number
+  dormant?: boolean
+  described?: boolean
+  efforts?: ReasoningEffort[]
+  [key: string]: unknown
+}
+
+/** One reasoning level a live catalog advertises for a summary route. */
+interface ReasoningEffort {
+  id: string
+  name?: string
+  description?: string
+  [key: string]: unknown
+}
+
+/** Catalog scan state the settings page renders. */
+interface CatalogState {
+  status: 'loading' | 'ready'
+  unavailable?: boolean
+  failed?: boolean
+  reason?: string
+  /** Always an array: the initial state seeds both, and a reload keeps the last values. */
+  groups: Array<{ id: string, models?: Array<{ id: string, reasoning?: { efforts?: ReasoningEffort[] } }> }>
+  failures: Array<{ id?: string, name?: string, message?: string }>
+}
+
+/** What `loadCatalog` returns before the caller stamps its status on it. */
+type CatalogResult = Omit<CatalogState, 'status'> & {
+  unavailable?: boolean
+  failed?: boolean
+  reason?: string
+  groups: CatalogState['groups']
+  failures: CatalogState['failures']
+}
+
+/** A live `remote.modelCatalog()` answer. */
+interface CatalogAnswer {
+  ok?: boolean
+  error?: { message?: string }
+  value?: { groups?: CatalogState['groups'], failures?: CatalogState['failures'] }
+}
+
+/** A remote session service exposing the model catalog. */
+interface RemoteSession {
+  modelCatalog(): Promise<CatalogAnswer>
+}
+
+/** Save feedback the settings page surfaces after one write. */
+type WriteStatus = null | 'saving' | 'thresholdSaved'
+
+/** Props the panel passes its labeled field row. */
+interface RowProps {
+  label: string
+  hint: string | undefined
+  children?: React.ReactNode
+}
+
+/** Props the panel passes its host-like switch. */
+interface ToggleProps {
+  checked: boolean
+  onChange: (next: boolean) => void
+  disabled: boolean | undefined
+  label: string
+}
+
+/** Props the panel passes its commit-on-blur numeric field. */
+interface NumericInputProps {
+  label: string
+  value: number
+  onCommit: (next: number) => unknown
+  disabled: boolean | undefined
+  parse?: (text: string) => number | undefined
+  format?: (value: number) => string
+  invalid: () => void
+}
+
+/** Props for the per-rule summary effort picker. */
+interface SummaryEffortSelectProps {
+  t: (key: string) => string
+  rule: ClientRule
+  rows: Map<string, CatalogRow>
+  disabled: boolean | undefined
+  onChange: (effort: string) => void
+}
+
+/** Props for the per-rule summary model picker. */
+interface SummaryModelSelectProps {
+  t: (key: string) => string
+  rule: ClientRule
+  candidates: CatalogRow[]
+  disabled: boolean | undefined
+  onChange: (selection: string) => void
+}
+
+/** Props for the whole settings panel. */
+interface PanelProps {
+  t: (key: string) => string
+  ctx: ClientContext
+  form: { state: FormSnapshot, mutate: FormStore['mutate'] } | undefined
+}

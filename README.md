@@ -52,12 +52,16 @@
 
 ## 开发
 
+源码在 `src/*.ts`，编译产物 `index.js`、`logic.js`、`client.js` 随仓库提交，包的 `exports` 指向它们，检出即可运行：
+
 ```sh
 pnpm install
-pnpm check
+pnpm check      # tsc 类型检查 → sucrase 重新生成产物 → 语法检查 → locale 一致性 → 测试
+pnpm build      # 仅重新生成产物
+pnpm typecheck  # 仅类型检查
 ```
 
-测试覆盖 Host 决策、范围选择和真实注册入口渲染的设置页。安装版 DSH 还可单独验证压缩事务；模型摘要由本地桩提供，不发网络请求。在 Desktop 的 DSH 终端中执行：
+产物由 sucrase 做纯类型擦除生成，保留源码的排版和注释；改动 `src/*.ts` 后需要重新构建，`git diff` 会精确显示类型标注之外的变化。测试覆盖 Host 决策、范围选择和真实注册入口渲染的设置页。安装版 DSH 还可单独验证压缩事务；模型摘要由本地桩提供，不发网络请求。在 Desktop 的 DSH 终端中执行：
 
 ```sh
 ELECTRON_RUN_AS_NODE=1 "$DSH_NODE_EXECUTABLE" --test tests/installed-host.test.mjs
